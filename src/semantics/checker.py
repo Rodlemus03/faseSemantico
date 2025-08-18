@@ -250,3 +250,239 @@ class SemanticChecker(ParseTreeVisitor):
         self.loop_depth -= 1
         self.scope = old
 
+    def visitBreakStatement(self, ctx):
+           if self.loop_depth <= 0:
+               self.err(ctx, "'break' solo se permite dentro de bucles.")
+
+    def visitContinueStatement(self, ctx):
+        if self.loop_depth <= 0:
+            self.err(ctx, "'continue' solo se permite dentro de bucles.")
+
+    def visitReturnStatement(self, ctx):
+        if self.current_function is None:
+            self.err(ctx, "'return' solo se permite dentro de una función.")
+            return None
+        expr = ctx.expression()
+        if expr:
+            et = self.visit(expr)
+        else:
+            et = NULL
+        if not self.current_function.type.is_compatible(et):
+            self.err(ctx, f"El 'return' devuelve {et} pero la función retorna {self.current_function.type}.")
+
+    # Blocks y scope
+    def visitBlock(self, ctx):
+        old = self.scope
+        self.scope = Scope(parent=old)
+        saw_terminal = False
+        for st in ctx.statement():
+            if saw_terminal:
+                self.err(st, "Código inalcanzable después de una instrucción de terminación.")
+            self.visit(st)
+            if self._is_terminal_stmt(st):
+                saw_terminal = True
+        self.scope = old
+        return None
+
+
+    # Funciones
+    def visitFunctionDeclaration(self, ctx):
+        name = ctx.Identifier().getText()
+
+        ret_ctx_getter = getattr(ctx, "type_", None)
+        ret_ctx = ret_ctx_getter() if callable(ret_ctx_getter) else None
+        ret = self._type_from_type(ret_ctx) if ret_ctx is not None else NULL
+
+        params = []
+        if ctx.parameters():
+            for p in ctx.parameters().parameter():
+                p_name = p.Identifier().getText()
+                p_type_getter = getattr(p, "type_", None)
+                p_type_ctx = p_type_getter() if callable(p_type_getter) else None
+                p_type = self._type_from_type(p_type_ctx) if p_type_ctx is not None else NULL
+                params.append(ParamSymbol(name=p_name, type=p_type))
+
+        func_sym = FunctionSymbol(name=name, type=ret, params=params)
+        try:
+            self.scope.define(func_sym)
+        except ValueError as ex:
+            self.err(ctx, str(ex))
+
+        # Nuevo scope para el cuerpo
+        old_scope = self.scope
+        self.scope = Scope(parent=old_scope)
+        for param in params:
+            try:
+                self.scope.define(param)
+            except ValueError as ex:
+                self.err(ctx, str(ex))
+
+        old_func = self.current_function
+        self.current_function = func_sym
+        self.visit(ctx.block())
+        self.current_function = old_func
+        self.scope = old_scope
+        return None
+
+
+    # Classes
+    def visitClassDeclaration(self, ctx):
+        name = ctx.Identifier(0).getText()
+        cls_sym = ClassSymbol(name=name, type=ClassType(name))
+        # registra clase en ámbito y en tabla
+        try:
+            self.scope.define(cls_sym)
+        except ValueError as ex:
+            self.err(ctx, str(ex))
+        self.class_table[name] = cls_sym
+
+        # recolecta miembros (campos y métodos con firmas)
+        for m in ctx.classMember():
+            if m.variableDeclaration():
+                v = m.variableDeclaration()
+                vname = v.Identifier().getText()
+                vtype = self._type_from_annotation(v.typeAnnotation()) or NULL
+                if vname in cls_sym.fields:
+                    self.err(v, f"Campo duplicado en clase '{name}': {vname}")
+                else:
+                    cls_sym.fields[vname] = VarSymbol(name=vname, type=vtype, initialized=bool(v.initializer()))
+            elif m.constantDeclaration():
+                c = m.constantDeclaration()
+                cname = c.Identifier().getText()
+                ctype = self._type_from_annotation(c.typeAnnotation()) or (self.visit(c.expression()) or NULL)
+                if cname in cls_sym.fields:
+                    self.err(c, f"Campo duplicado en clase '{name}': {cname}")
+                else:
+                    cls_sym.fields[cname] = VarSymbol(name=cname, type=ctype, is_const=True, initialized=True)
+            elif m.functionDeclaration():
+                f = m.functionDeclaration()
+                fname = f.Identifier().getText()
+                rt = NULL
+                if f.type_():
+                    rt = self._type_from_type(f.type_())
+                ps = []
+                if f.parameters():
+                    for p in f.parameters().parameter():
+                        pt = self._type_from_type(p.type_()) if p.type_() else NULL
+                        ps.append(ParamSymbol(name=p.Identifier().getText(), type=pt))
+                if fname in cls_sym.methods:
+                    self.err(f, f"Método duplicado en clase '{name}': {fname}")
+                cls_sym.methods[fname] = FunctionSymbol(name=fname, type=rt, params=ps)
+
+        # chequear los cuerpos de los métodos con 'this' y los params
+        for m in ctx.classMember():
+            if m.functionDeclaration():
+                f = m.functionDeclaration()
+                fname = f.Identifier().getText()
+                fn = cls_sym.methods[fname]
+
+                old_scope, old_func, old_cls = self.scope, self.current_function, self.current_class
+                self.scope = Scope(parent=old_scope)
+                self.current_function = fn
+                self.current_class = cls_sym
+                self.scope.define(VarSymbol(name="this", type=ClassType(name), initialized=True))
+                for p in fn.params:
+                    try:
+                        self.scope.define(p)
+                    except ValueError as ex:
+                        self.err(f, str(ex))
+                self.visit(f.block())
+                self.scope, self.current_function, self.current_class = old_scope, old_func, old_cls
+        return None
+
+   
+    # Expresiones
+
+    def visitAssignExpr(self, ctx):
+        rhs_t = self.visit(ctx.assignmentExpr())
+        return rhs_t
+
+    def visitPropertyAssignExpr(self, ctx):
+        return self.visit(ctx.assignmentExpr())
+
+    def visitExprNoAssign(self, ctx):
+        return self.visit(ctx.conditionalExpr())
+
+    # logicalOrExpr
+    def visitTernaryExpr(self, ctx):
+        has_q = any(
+            hasattr(ctx.getChild(i), "getText") and ctx.getChild(i).getText() == "?"
+            for i in range(ctx.getChildCount())
+        )
+
+        # Tipo de la condición
+        cond_t = self.visit(ctx.logicalOrExpr())
+
+        if not has_q:
+            return cond_t
+
+        try:
+            e1_ctx = ctx.expression(0)
+            e2_ctx = ctx.expression(1)
+        except Exception:
+            self.err(ctx, "Forma de operador ternario no reconocida por la gramática.")
+            return NULL
+
+        e1_t = self.visit(e1_ctx)
+        e2_t = self.visit(e2_ctx)
+
+        if not isinstance(cond_t, BooleanType):
+            self.err(ctx, "El predicado del operador ternario debe ser boolean.")
+
+        if not e1_t.is_compatible(e2_t):
+            self.err(ctx, "Ambas ramas del operador ternario deben tener el mismo tipo.")
+
+        return e1_t
+
+    def visitLogicalOrExpr(self, ctx):
+        if len(ctx.children) == 1:
+            return self.visit(ctx.logicalAndExpr(0))
+        t = BOOL
+        for i in range(len(ctx.logicalAndExpr())):
+            et = self.visit(ctx.logicalAndExpr(i))
+            if not isinstance(et, BooleanType):
+                self.err(ctx, "Operación lógica requiere booleanos.")
+        return BOOL
+
+    def visitLogicalAndExpr(self, ctx):
+        if len(ctx.children) == 1:
+            return self.visit(ctx.equalityExpr(0))
+        for i in range(len(ctx.equalityExpr())):
+            et = self.visit(ctx.equalityExpr(i))
+            if not isinstance(et, BooleanType):
+                self.err(ctx, "Operación lógica requiere booleanos.")
+        return BOOL
+
+    def visitEqualityExpr(self, ctx):
+        if len(ctx.children) == 1:
+            return self.visit(ctx.relationalExpr(0))
+        n = len(ctx.relationalExpr())
+        t0 = self.visit(ctx.relationalExpr(0))
+        for i in range(1, n):
+            ti = self.visit(ctx.relationalExpr(i))
+            if not t0.is_compatible(ti):
+                self.err(ctx, "Comparación entre tipos incompatibles.")
+            t0 = ti
+        return BOOL
+
+    def visitRelationalExpr(self, ctx):
+        if len(ctx.children) == 1:
+            return self.visit(ctx.additiveExpr(0))
+        n = len(ctx.additiveExpr())
+        t0 = self.visit(ctx.additiveExpr(0))
+        for i in range(1, n):
+            ti = self.visit(ctx.additiveExpr(i))
+            if not (isinstance(t0, (IntegerType, FloatType)) and isinstance(ti, (IntegerType, FloatType))):
+                self.err(ctx, "Comparación relacional requiere números.")
+            t0 = ti
+        return BOOL
+
+    def visitAdditiveExpr(self, ctx):
+        if len(ctx.children) == 1:
+            return self.visit(ctx.multiplicativeExpr(0))
+        a = self.visit(ctx.multiplicativeExpr(0))
+        b = self.visit(ctx.multiplicativeExpr(1))
+        if isinstance(a, (IntegerType, FloatType)) and isinstance(b, (IntegerType, FloatType)):
+            return FLOAT if isinstance(a, FloatType) or isinstance(b, FloatType) else INT
+        self.err(ctx, "Suma/resta requiere operandos numéricos (integer/float).")
+        return NULL
