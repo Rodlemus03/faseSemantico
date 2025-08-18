@@ -564,3 +564,119 @@ class SemanticChecker(ParseTreeVisitor):
 
         return NULL
 
+    
+    def visitLeftHandSide(self, ctx):
+        base_sym = None
+        pa = ctx.primaryAtom()
+        t = None
+
+        if hasattr(pa, "Identifier") and pa.Identifier():
+            name = pa.Identifier().getText()
+            sym = self.scope.resolve(name)
+            if sym is None:
+                self.err(pa, f"Identificador no declarado: {name}")
+                t = NULL
+            else:
+                base_sym = sym
+                t = getattr(sym, "type", NULL)
+
+        elif pa.getText() == "this":
+            if self.current_class is None:
+                self.err(pa, "'this' solo puede usarse dentro de métodos de clase.")
+                t = NULL
+            else:
+                t = ClassType(self.current_class.name)
+
+        elif pa.getChildCount() >= 2 and pa.getChild(0).getText() == "new":
+            cname = pa.getChild(1).getText()
+            t = ClassType(cname)
+
+        else:
+            t = self.visit(pa)
+
+        # aplicar sufijos
+        for op in ctx.suffixOp():
+            first_txt = op.getChild(0).getText() if op.getChildCount() > 0 else ""
+
+            if first_txt == "(":
+                # recolectar argumentos
+                arg_nodes = []
+                if hasattr(op, "arguments") and op.arguments():
+                    arg_nodes = self._expr_all(op.arguments())
+                else:
+                    arg_nodes = self._expr_all(op)
+                arg_types = [self.visit(e) for e in arg_nodes]
+
+                fn = None
+                if isinstance(base_sym, FunctionSymbol):
+                    fn = base_sym
+                elif isinstance(t, ClassType) and False:
+                    pass
+                elif isinstance(base_sym, VarSymbol) and isinstance(base_sym.type, ClassType):
+                    pass
+
+                if fn is not None:
+                    if len(arg_types) != len(fn.params):
+                        self.err(op, f"La función '{fn.name}' espera {len(fn.params)} argumentos, pero recibió {len(arg_types)}.")
+                    else:
+                        for i, (pt, at) in enumerate(zip([p.type for p in fn.params], arg_types)):
+                            if not pt.is_compatible(at):
+                                self.err(op, f"Argumento {i+1} de '{fn.name}' debe ser {pt}, pero recibió {at}.")
+                    t = fn.type
+                    base_sym = None
+                    continue
+
+                if isinstance(base_sym, FunctionSymbol):
+                    pass
+                else:
+                    self.err(op, "Llamada aplicada a algo que no es función declarada.")
+                    t = NULL
+
+            # indexación
+            elif first_txt == "[":
+                # índice
+                idx_node = None
+                if hasattr(op, "expression"):
+                    xs = op.expression()
+                    idx_node = xs[0] if isinstance(xs, list) and xs else (xs if xs else None)
+                if not isinstance(t, ArrayType):
+                    self.err(op, "Indexación requiere un arreglo.")
+                    t = NULL
+                else:
+                    if idx_node is not None:
+                        it = self.visit(idx_node)
+                        if not isinstance(it, IntegerType):
+                            self.err(op, "El índice de un arreglo debe ser integer.")
+                    t = t.elem
+                base_sym = None
+
+            # acceso a propiedad: '.' Identifier
+            elif first_txt == ".":
+                if not isinstance(t, ClassType):
+                    self.err(op, "Acceso a propiedad sobre algo que no es objeto/clase.")
+                    t = NULL
+                    base_sym = None
+                    continue
+
+                member = op.getChild(1).getText()
+                cls = self.class_table.get(t.name)
+                if not cls:
+                    self.err(op, f"Clase '{t.name}' no declarada.")
+                    t = NULL
+                    base_sym = None
+                    continue
+
+                if member in cls.fields:
+                    t = cls.fields[member].type
+                    base_sym = None
+                elif member in cls.methods:
+                    base_sym = cls.methods[member]
+                    t = base_sym.type
+                else:
+                    self.err(op, f"'{t.name}' no tiene miembro '{member}'.")
+                    t = NULL
+                    base_sym = None
+
+        return t
+    
+    
