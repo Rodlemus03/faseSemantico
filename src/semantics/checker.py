@@ -486,3 +486,81 @@ class SemanticChecker(ParseTreeVisitor):
             return FLOAT if isinstance(a, FloatType) or isinstance(b, FloatType) else INT
         self.err(ctx, "Suma/resta requiere operandos numéricos (integer/float).")
         return NULL
+    
+    
+    def visitMultiplicativeExpr(self, ctx):
+        if len(ctx.children) == 1:
+            return self.visit(ctx.unaryExpr(0))
+        a = self.visit(ctx.unaryExpr(0))
+        b = self.visit(ctx.unaryExpr(1))
+        if isinstance(a, (IntegerType, FloatType)) and isinstance(b, (IntegerType, FloatType)):
+            return FLOAT if isinstance(a, FloatType) or isinstance(b, FloatType) else INT
+        self.err(ctx, "Multiplicación/división requiere números.")
+        return NULL
+
+    def visitUnaryExpr(self, ctx):
+        if ctx.getChildCount() == 1:
+            return self.visit(ctx.primaryExpr())
+
+        op_text = ctx.getChild(0).getText()
+        operand_t = self.visit(ctx.unaryExpr())
+
+        if op_text == '!':
+            if not isinstance(operand_t, BooleanType):
+                self.err(ctx, "Negación lógica requiere boolean.")
+                return NULL
+            return BOOL
+
+        if op_text in ('+', '-'):
+            if isinstance(operand_t, (IntegerType, FloatType)):
+                return operand_t
+            self.err(ctx, "Operador unario numérico requiere operandos numéricos.")
+            return NULL
+
+        return operand_t
+
+    def visitPrimaryExpr(self, ctx):
+        
+        if ctx.literalExpr():
+            return self.visit(ctx.literalExpr())
+        if ctx.leftHandSide():
+            return self.visit(ctx.leftHandSide())
+        if hasattr(ctx, "expression") and ctx.expression():
+            return self.visit(ctx.expression())
+        return NULL
+
+    # clasifica literales
+    def visitLiteralExpr(self, ctx):
+        txt = ctx.getText()
+
+        # String
+        if len(txt) >= 2 and txt[0] == '"' and txt[-1] == '"':
+            return STR
+
+        # Booleanos
+        if txt == "true" or txt == "false":
+            return BOOL
+
+        # null
+        if txt == "null":
+            return NULL
+
+        # Array literal
+        if hasattr(ctx, "arrayLiteral") and ctx.arrayLiteral():
+            elems = ctx.arrayLiteral().expression()
+            if not elems:
+                return ArrayType(NULL)
+            first_t = self.visit(elems[0]) or NULL
+            for e in elems[1:]:
+                if not first_t.is_compatible(self.visit(e) or NULL):
+                    self.err(ctx, "Arreglo con elementos de tipos incompatibles.")
+                    return ArrayType(NULL)
+            return ArrayType(first_t)
+        if all(ch.isdigit() or ch=='.' for ch in txt) and ('.' in txt):
+         return FLOAT
+        # Entero
+        if txt.isdigit():
+            return INT
+
+        return NULL
+
