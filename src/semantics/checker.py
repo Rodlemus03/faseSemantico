@@ -680,3 +680,99 @@ class SemanticChecker(ParseTreeVisitor):
         return t
     
     
+    def visitPrimaryAtom(self, ctx):
+        if hasattr(ctx, "Identifier") and ctx.Identifier():
+            name = ctx.Identifier().getText()
+            sym = self.scope.resolve(name)
+            if sym is None:
+                self.err(ctx, f"Identificador no declarado: {name}")
+                return NULL
+            return getattr(sym, "type", NULL)
+
+        if ctx.getText() == "this":
+            if self.current_class is None:
+                self.err(ctx, "'this' solo puede usarse dentro de métodos de clase.")
+                return NULL
+            return ClassType(self.current_class.name)
+
+        if ctx.getChildCount() >= 2 and ctx.getChild(0).getText() == "new":
+            return ClassType(ctx.getChild(1).getText())
+
+        return NULL
+
+
+    def visitCallExpr(self, ctx):
+        return NULL
+
+    def visitIndexExpr(self, ctx):
+        arr_t = self.visit(ctx.expression())
+        if not isinstance(arr_t, ArrayType):
+            self.err(ctx, "Indexación requiere un arreglo.")
+            return NULL
+        return arr_t.elem
+
+    def visitPropertyAccessExpr(self, ctx):
+        return NULL
+
+    # Helpers
+    def _type_from_annotation(self, ann):
+        """Obtiene el tipo desde una anotación de la gramática (typeAnnotation)."""
+        if ann is None:
+            return None
+        tctx = getattr(ann, "type_", None)
+        if callable(tctx):
+            tctx = tctx()
+        if tctx is None and hasattr(ann, "type"):
+            try:
+                tctx = ann.type()
+            except Exception:
+                tctx = None
+        if tctx is None and hasattr(ann, "baseType"):
+            try:
+                tctx = ann.baseType()
+            except Exception:
+                tctx = None
+        return self._type_from_typectx(tctx)
+
+    # Compatibilidad con nombre antiguo
+    def _type_from_type(self, tctx):
+        return self._type_from_typectx(tctx)
+    
+    # Normaliza el texto del contexto de tipo, incluyendo arreglos 
+    def _type_from_typectx(self, tctx):
+        if tctx is None:
+            return NULL
+        txt = tctx.getText()
+        dims = 0
+        while txt.endswith("[]"):
+            dims += 1
+            txt = txt[:-2]
+        base = {
+            "integer": INT,
+            "float":   FLOAT,
+            "string":  STR,
+            "boolean": BOOL,
+            "null":    NULL
+        }.get(txt, ClassType(txt))
+        for _ in range(dims):
+            base = ArrayType(base)
+        return base
+
+    def _infer_type(self, expr_ctx):
+        if expr_ctx is None: return NULL
+        return self.visit(expr_ctx)
+    def visitSwitchStatement(self, ctx):
+        cond_t = self.visit(ctx.expression())
+        if not isinstance(cond_t, BooleanType):
+            self.err(ctx, "La expresión de 'switch' debe ser boolean.")
+        for sc in ctx.switchCase():
+            for st in sc.statement():
+                self.visit(st)
+        if ctx.defaultCase():
+            for st in ctx.defaultCase().statement():
+                self.visit(st)
+    def _is_terminal_stmt(self, st):
+            try:
+                return bool(st.returnStatement() or st.breakStatement() or st.continueStatement())
+            except Exception:
+                return False
