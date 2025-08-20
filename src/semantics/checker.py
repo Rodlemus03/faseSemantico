@@ -17,6 +17,38 @@ class SemanticChecker(ParseTreeVisitor):
         self.class_table = {}
         self.current_class = None
 
+    # ---------------- Utils de expresiones ----------------
+    def _collect_call_args(self, node):
+   
+        # Contenedores típicos
+        for attr in ("argumentList", "arguments", "argList", "args", "exprList"):
+            if hasattr(node, attr) and getattr(node, attr)():
+                cont = getattr(node, attr)()
+                # cont puede ser nodo o lista
+                if isinstance(cont, list):
+                    expr_nodes = []
+                    for item in cont:
+                        if hasattr(item, "expression") and item.expression():
+                            ex = item.expression()
+                            expr_nodes.extend(ex if isinstance(ex, list) else [ex])
+                        else:
+                            # algunos grammars ya devuelven expression directamente
+                            expr_nodes.append(item)
+                    return expr_nodes
+                else:
+                    if hasattr(cont, "expression") and cont.expression():
+                        ex = cont.expression()
+                        return ex if isinstance(ex, list) else [ex]
+    
+        # Fallback general: expression() directo en el nodo
+        if hasattr(node, "expression") and node.expression():
+            ex = node.expression()
+            return ex if isinstance(ex, list) else [ex]
+    
+        # Sin argumentos
+        return []
+
+
     def _expr_child(self, ctx, idx=0):
         if ctx is None or not hasattr(ctx, "expression"):
             return None
@@ -30,6 +62,8 @@ class SemanticChecker(ParseTreeVisitor):
             return []
         ex = ctx.expression()
         return ex if isinstance(ex, list) else [ex]
+
+    # ---------------- Infra básica ----------------
 
     def visitChildren(self, node):
         res = None
@@ -68,23 +102,23 @@ class SemanticChecker(ParseTreeVisitor):
         tok = ctx.start
         line, col = tok.line, tok.column
         self.errors.append(f"[SemanticError] L{line}:C{col} {message}")
-        # --------- Helpers de TIPOS ---------
+
+    # --------- Helpers de TIPOS ---------
 
     def _type_from_annotation(self, ann):
- 
         if ann is None:
             return None
         tctx = ann.type_() if hasattr(ann, "type_") and callable(ann.type_) else ann
         return self._type_from_type(tctx)
 
     def _type_from_type(self, tctx):
-
         if tctx is None:
             return NULL
         txt = getattr(tctx, "getText", lambda: "")()
         if not txt:
             return NULL
 
+        # arrays: base[]
         if txt.endswith("[]"):
             base = txt[:-2]
             elem = self._primitive_by_name(base) or ClassType(base)
@@ -93,7 +127,6 @@ class SemanticChecker(ParseTreeVisitor):
             except Exception:
                 return NULL
 
-        # primitivos
         prim = self._primitive_by_name(txt)
         if prim is not None:
             return prim
@@ -125,15 +158,13 @@ class SemanticChecker(ParseTreeVisitor):
             return NULL
 
     def _is_terminal_stmt(self, st):
-        getters = (
-            "returnStatement",
-            "breakStatement",
-            "continueStatement",
-        )
+        getters = ("returnStatement", "breakStatement", "continueStatement")
         for g in getters:
             if hasattr(st, g) and getattr(st, g)():
                 return True
         return False
+
+    # ---------------- Programa / declaraciones ----------------
 
     def visitProgram(self, ctx):
         for st in ctx.statement():
@@ -164,7 +195,6 @@ class SemanticChecker(ParseTreeVisitor):
                 self.err(ctx, f"Asignación incompatible: variable '{name}' es {vtype} pero expresión es {et}.")
         return None
 
-    # Const declaracion
     def visitConstantDeclaration(self, ctx):
         name = ctx.Identifier().getText()
         declared_type = self._type_from_annotation(ctx.typeAnnotation())
@@ -181,11 +211,13 @@ class SemanticChecker(ParseTreeVisitor):
             self.err(ctx, str(ex))
         return None
 
+    # ---------------- Asignaciones ----------------
+
     def visitAssignment(self, ctx):
-        # Caso: x = expr;
+        # x = expr;
         if ctx.getChildCount() >= 2 and getattr(ctx.getChild(1), "getText", lambda: "")() == "=":
             ident = ctx.Identifier()
-            if isinstance(ident, list):
+            if isinstance(ident, list) and ident:
                 name = ident[0].getText()
             else:
                 name = ident.getText() if ident else "<unknown>"
@@ -206,16 +238,34 @@ class SemanticChecker(ParseTreeVisitor):
                 sym.initialized = True
             return None
 
-        # Caso: obj.prop = expr;
+        # obj.prop = expr;
         exprs = self._expr_all(ctx)
-        obj_node = exprs[0] if len(exprs) >= 1 else None
-        rhs_node = exprs[1] if len(exprs) >= 2 else None
+        if not exprs or len(exprs) < 2:
+            self.err(ctx, "Asignación de propiedad mal formada.")
+            return None
 
-        ident = ctx.Identifier()
-        if isinstance(ident, list):
-            prop_name = ident[-1].getText() if ident else None
-        else:
-            prop_name = ident.getText() if ident else None
+        obj_node = exprs[0]
+        rhs_node = exprs[-1]
+
+        # nombre de propiedad robusto
+        prop_name = None
+        ids = ctx.Identifier() if hasattr(ctx, "Identifier") else None
+        if isinstance(ids, list) and ids:
+            prop_name = ids[-1].getText()
+        elif ids:
+            prop_name = ids.getText()
+
+        if prop_name is None:
+            for i in range(ctx.getChildCount() - 1):
+                if getattr(ctx.getChild(i), "getText", lambda: "")() == ".":
+                    nxt = ctx.getChild(i + 1)
+                    prop_name = getattr(nxt, "getText", lambda: None)()
+                    if prop_name:
+                        break
+
+        if prop_name is None:
+            self.err(ctx, "No se pudo determinar el nombre de la propiedad en la asignación.")
+            return None
 
         obj_t = self.visit(obj_node) if obj_node else NULL
         rhs_t = self.visit(rhs_node) if rhs_node else NULL
@@ -229,19 +279,20 @@ class SemanticChecker(ParseTreeVisitor):
             self.err(ctx, f"Clase '{obj_t.name}' no declarada.")
             return None
 
-        # >>>>>>>>>>>>>> CAMBIO: lookup respetando herencia
         field = self._lookup_field_in_hierarchy(cls, prop_name)
         if field is None:
             self.err(ctx, f"La clase '{obj_t.name}' no tiene campo '{prop_name}'.")
             return None
-        # <<<<<<<<<<<<<<
 
         if getattr(field, "is_const", False):
             self.err(ctx, f"No se puede asignar al campo constante '{prop_name}'.")
 
         if not field.type.is_compatible(rhs_t):
             self.err(ctx, f"Asignación incompatible: campo '{prop_name}' es {field.type} pero expresión es {rhs_t}.")
+
         return None
+
+    # ---------------- Sentencias ----------------
 
     def visitExpressionStatement(self, ctx):
         self.visit(ctx.expression())
@@ -275,8 +326,6 @@ class SemanticChecker(ParseTreeVisitor):
 
     def visitForStatement(self, ctx):
         self.loop_depth += 1
-
-        # inicializador: puede ser declaración, asignación o ';'
         first = ctx.getChild(2) if ctx.getChildCount() > 2 else None
         if hasattr(first, "accept"):
             self.visit(first)
@@ -329,21 +378,8 @@ class SemanticChecker(ParseTreeVisitor):
         if not self.current_function.type.is_compatible(et):
             self.err(ctx, f"El 'return' devuelve {et} pero la función retorna {self.current_function.type}.")
 
-    # Blocks y scope
-    def visitBlock(self, ctx):
-        old = self.scope
-        self.scope = Scope(parent=old)
-        saw_terminal = False
-        for st in ctx.statement():
-            if saw_terminal:
-                self.err(st, "Código inalcanzable después de una instrucción de terminación.")
-            self.visit(st)
-            if self._is_terminal_stmt(st):
-                saw_terminal = True
-        self.scope = old
-        return None
+    # ---------------- Funciones ----------------
 
-    # Funciones
     def visitFunctionDeclaration(self, ctx):
         name = ctx.Identifier().getText()
 
@@ -366,7 +402,6 @@ class SemanticChecker(ParseTreeVisitor):
         except ValueError as ex:
             self.err(ctx, str(ex))
 
-        # Nuevo scope para el cuerpo
         old_scope = self.scope
         self.scope = Scope(parent=old_scope)
         for param in params:
@@ -382,7 +417,8 @@ class SemanticChecker(ParseTreeVisitor):
         self.scope = old_scope
         return None
 
-    # --------- LOOKUP con herencia ---------
+    # ---------------- Lookup con herencia ----------------
+
     def _lookup_field_in_hierarchy(self, cls_sym, name):
         cur = cls_sym
         while cur:
@@ -399,23 +435,38 @@ class SemanticChecker(ParseTreeVisitor):
             cur = getattr(cur, "base", None)
         return None
 
-    # --------- Clases ---------
+    # ---------------- Clases ----------------
+
     def visitClassDeclaration(self, ctx):
-        # Nombre de la clase
         name = ctx.Identifier(0).getText()
         cls_sym = ClassSymbol(name=name, type=ClassType(name))
 
-        # Registrar clase en el scope y en la tabla de clases
+        # registrar
         try:
             self.scope.define(cls_sym)
         except ValueError as ex:
             self.err(ctx, str(ex))
         self.class_table[name] = cls_sym
 
-        # ----- ENLACE DE CLASE BASE (herencia) -----
+        # herencia robusta: busca ': Base'
         try:
-            if ctx.getChildCount() >= 3 and ctx.getChild(1).getText() == ":":
-                base_name = ctx.Identifier(1).getText()
+            base_name = None
+            for i in range(ctx.getChildCount() - 1):
+                if getattr(ctx.getChild(i), "getText", lambda: "")() == ":":
+                    nxt = ctx.getChild(i + 1)
+                    # preferir segundo Identifier del contexto
+                    if hasattr(ctx, "Identifier"):
+                        ids = ctx.Identifier()
+                        if isinstance(ids, list) and len(ids) >= 2:
+                            base_name = ids[1].getText()
+                        elif not isinstance(ids, list) and ids:
+                            # si la gramática entrega 1 solo, usa token directo
+                            base_name = getattr(nxt, "getText", lambda: None)()
+                    else:
+                        base_name = getattr(nxt, "getText", lambda: None)()
+                    break
+
+            if base_name:
                 base_sym = self.class_table.get(base_name)
                 if base_sym is None:
                     self.err(ctx, f"Clase base '{base_name}' no declarada.")
@@ -424,7 +475,7 @@ class SemanticChecker(ParseTreeVisitor):
         except Exception:
             pass
 
-        # ----- RECOLECCIÓN DE MIEMBROS (campos y firmas de métodos) -----
+        # miembros (campos/firmas)
         for m in ctx.classMember():
             if m.variableDeclaration():
                 v = m.variableDeclaration()
@@ -456,9 +507,7 @@ class SemanticChecker(ParseTreeVisitor):
             elif m.functionDeclaration():
                 f = m.functionDeclaration()
                 fname = f.Identifier().getText()
-                rt = NULL
-                if f.type_():
-                    rt = self._type_from_type(f.type_())
+                rt = self._type_from_type(f.type_()) if f.type_() else NULL
                 ps = []
                 if f.parameters():
                     for p in f.parameters().parameter():
@@ -468,7 +517,7 @@ class SemanticChecker(ParseTreeVisitor):
                     self.err(f, f"Método duplicado en clase '{name}': {fname}")
                 cls_sym.methods[fname] = FunctionSymbol(name=fname, type=rt, params=ps)
 
-        # ----- CHEQUEO DE CUERPOS DE MÉTODOS -----
+        # cuerpos de métodos
         for m in ctx.classMember():
             if m.functionDeclaration():
                 f = m.functionDeclaration()
@@ -480,10 +529,7 @@ class SemanticChecker(ParseTreeVisitor):
                 self.current_function = fn
                 self.current_class = cls_sym
 
-                # 'this' del tipo de la clase actual
                 self.scope.define(VarSymbol(name="this", type=ClassType(name), initialized=True))
-
-                # parámetros
                 for p in fn.params:
                     try:
                         self.scope.define(p)
@@ -496,11 +542,10 @@ class SemanticChecker(ParseTreeVisitor):
 
         return None
 
-    # --------- Expresiones ---------
+    # ---------------- Expresiones ----------------
 
     def visitAssignExpr(self, ctx):
-        rhs_t = self.visit(ctx.assignmentExpr())
-        return rhs_t
+        return self.visit(ctx.assignmentExpr())
 
     def visitPropertyAssignExpr(self, ctx):
         return self.visit(ctx.assignmentExpr())
@@ -508,7 +553,6 @@ class SemanticChecker(ParseTreeVisitor):
     def visitExprNoAssign(self, ctx):
         return self.visit(ctx.conditionalExpr())
 
-    # ternario
     def visitTernaryExpr(self, ctx):
         has_q = any(
             hasattr(ctx.getChild(i), "getText") and ctx.getChild(i).getText() == "?"
@@ -574,15 +618,12 @@ class SemanticChecker(ParseTreeVisitor):
         return BOOL
 
     def visitAdditiveExpr(self, ctx):
-        # Un solo término
         if len(ctx.children) == 1:
             return self.visit(ctx.multiplicativeExpr(0))
 
-        # Operadores y términos
         ops = [ctx.getChild(i).getText() for i in range(1, ctx.getChildCount(), 2)]
         terms = [self.visit(ctx.multiplicativeExpr(i)) for i in range(len(ctx.multiplicativeExpr()))]
 
-        # ¿Hay strings? -> concatenación solo con '+'
         has_str = any(isinstance(t, StringType) for t in terms)
         if has_str:
             if all(op == '+' for op in ops):
@@ -590,10 +631,153 @@ class SemanticChecker(ParseTreeVisitor):
             self.err(ctx, "Operación aditiva con string solo permite '+'.")
             return NULL
 
-        # Numérica
         all_numeric = all(isinstance(t, (IntegerType, FloatType)) for t in terms)
         if all_numeric:
             return FLOAT if any(isinstance(t, FloatType) for t in terms) else INT
 
         self.err(ctx, "Suma/resta requiere operandos numéricos (integer/float).")
         return NULL
+
+    # -------- Postfijos / Acceso a miembros / Llamadas --------
+
+    def visitLeftHandSide(self, ctx):
+
+        # base
+        t = self.visit(ctx.primaryAtom())
+        callee_sym = None
+
+        # Si el átomo es un identificador de función global, márcalo como callee
+        try:
+            pa = ctx.primaryAtom()
+            if hasattr(pa, "Identifier") and pa.Identifier():
+                ident_node = pa.Identifier()
+                name = ident_node[0].getText() if isinstance(ident_node, list) else ident_node.getText()
+                sym = self.scope.resolve(name)
+                if isinstance(sym, FunctionSymbol):
+                    callee_sym = sym
+                    t = sym.type
+        except Exception:
+            pass
+
+        # sufijos
+        for op in ctx.suffixOp():
+            first_txt = getattr(op.getChild(0), "getText", lambda: "")()
+
+            # .ident
+            if first_txt == ".":
+                member = op.getChild(1).getText()
+
+                if not isinstance(t, ClassType):
+                    self.err(op, "Acceso a miembro requiere un objeto.")
+                    t = NULL
+                    callee_sym = None
+                    continue
+
+                cls = self.class_table.get(t.name)
+                if not cls:
+                    self.err(op, f"Clase '{t.name}' no declarada.")
+                    t = NULL
+                    callee_sym = None
+                    continue
+
+                field_sym = self._lookup_field_in_hierarchy(cls, member)
+                if field_sym is not None:
+                    t = field_sym.type
+                    callee_sym = None
+                    continue
+
+                method_sym = self._lookup_method_in_hierarchy(cls, member)
+                if method_sym is not None:
+                    callee_sym = method_sym
+                    t = method_sym.type
+                    continue
+
+                self.err(op, f"'{t.name}' no tiene miembro '{member}'.")
+                t = NULL
+                callee_sym = None
+                continue
+
+            # llamada (...)
+            if first_txt == "(":
+                if callee_sym is None:
+                    self.err(op, "Llamada aplicada a algo que no es función declarada.")
+                    t = NULL
+                    continue
+                
+                # Usa el helper para capturar argumentos sin importar el nombre de la subregla
+                arg_nodes = self._collect_call_args(op)
+                args_t = [self.visit(e) or NULL for e in arg_nodes]
+
+                params = callee_sym.params
+                if len(params) != len(args_t):
+                    self.err(op, f"Número de argumentos incompatible: se esperaban {len(params)} y se pasaron {len(args_t)}.")
+                else:
+                    for i, (p, a) in enumerate(zip(params, args_t), 1):
+                        if not p.type.is_compatible(a):
+                            self.err(op, f"Argumento {i} incompatible: se esperaba {p.type} y se pasó {a}.")
+
+                callee_sym = None
+                continue
+
+
+            # indexación [expr]
+            if first_txt == "[":
+                if not isinstance(t, ArrayType):
+                    self.err(op, "Indexación requiere un arreglo.")
+                    t = NULL
+                    continue
+                idx_expr = getattr(op, "expression", lambda: None)()
+                if idx_expr:
+                    idx_t = self.visit(idx_expr)
+                    if not isinstance(idx_t, IntegerType):
+                        self.err(op, "El índice de un arreglo debe ser integer.")
+                t = t.elem
+                continue
+
+        return t
+
+    # -------- Creación de objetos --------
+
+    def visitNewExpr(self, ctx):
+     
+        class_name = None
+        if hasattr(ctx, "Identifier") and ctx.Identifier():
+            ids = ctx.Identifier()
+            class_name = ids[0].getText() if isinstance(ids, list) else ids.getText()
+        if not class_name:
+            for i in range(ctx.getChildCount() - 1):
+                if getattr(ctx.getChild(i), "getText", lambda: "")() == "new":
+                    nxt = ctx.getChild(i + 1)
+                    class_name = getattr(nxt, "getText", lambda: None)()
+                    break
+        if not class_name:
+            self.err(ctx, "No se pudo determinar el nombre de la clase en 'new'.")
+            return NULL
+
+        cls = self.class_table.get(class_name)
+        if not cls:
+            self.err(ctx, f"Clase '{class_name}' no declarada.")
+            return NULL
+
+        arg_nodes = self._collect_call_args(ctx)
+        if not arg_nodes:
+            try:
+                ex = ctx.expression()
+                if ex:
+                    arg_nodes = ex if isinstance(ex, list) else [ex]
+            except Exception:
+                pass
+
+        args_t = [self.visit(e) or NULL for e in arg_nodes]
+
+        ctor = self._lookup_method_in_hierarchy(cls, "constructor")
+        if ctor:
+            params = ctor.params
+            if len(params) != len(args_t):
+                self.err(ctx, f"Constructor de '{class_name}' espera {len(params)} argumentos y se pasaron {len(args_t)}.")
+            else:
+                for i, (p, a) in enumerate(zip(params, args_t), 1):
+                    if not p.type.is_compatible(a):
+                        self.err(ctx, f"Argumento {i} incompatible para constructor: se esperaba {p.type} y se pasó {a}.")
+
+        return ClassType(class_name)
