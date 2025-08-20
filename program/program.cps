@@ -1,5 +1,5 @@
 // Programa de ejemplo para Compiscript
-let x: integer = "10";
+let x: integer = 10;
 const PI: integer = 314;
 
 function suma(a: integer, b: integer): integer {
