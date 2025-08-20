@@ -40,7 +40,7 @@ class SemanticChecker(ParseTreeVisitor):
                         ex = cont.expression()
                         return ex if isinstance(ex, list) else [ex]
     
-        # Fallback general: expression() directo en el nodo
+        # expression() directo en el nodo
         if hasattr(node, "expression") and node.expression():
             ex = node.expression()
             return ex if isinstance(ex, list) else [ex]
@@ -460,7 +460,7 @@ class SemanticChecker(ParseTreeVisitor):
                         if isinstance(ids, list) and len(ids) >= 2:
                             base_name = ids[1].getText()
                         elif not isinstance(ids, list) and ids:
-                            # si la gramática entrega 1 solo, usa token directo
+                            # si la gramática entrega 1 usa token directo
                             base_name = getattr(nxt, "getText", lambda: None)()
                     else:
                         base_name = getattr(nxt, "getText", lambda: None)()
@@ -475,7 +475,7 @@ class SemanticChecker(ParseTreeVisitor):
         except Exception:
             pass
 
-        # miembros (campos/firmas)
+        # campos y firmas
         for m in ctx.classMember():
             if m.variableDeclaration():
                 v = m.variableDeclaration()
@@ -646,7 +646,7 @@ class SemanticChecker(ParseTreeVisitor):
         t = self.visit(ctx.primaryAtom())
         callee_sym = None
 
-        # Si el átomo es un identificador de función global, márcalo como callee
+        # Si el átomo es un identificador de función global, marca como callee
         try:
             pa = ctx.primaryAtom()
             if hasattr(pa, "Identifier") and pa.Identifier():
@@ -697,14 +697,14 @@ class SemanticChecker(ParseTreeVisitor):
                 callee_sym = None
                 continue
 
-            # llamada (...)
+            # llamada 
             if first_txt == "(":
                 if callee_sym is None:
                     self.err(op, "Llamada aplicada a algo que no es función declarada.")
                     t = NULL
                     continue
                 
-                # Usa el helper para capturar argumentos sin importar el nombre de la subregla
+                # El helper captura argumentos sin importar el nombre de la subregla
                 arg_nodes = self._collect_call_args(op)
                 args_t = [self.visit(e) or NULL for e in arg_nodes]
 
