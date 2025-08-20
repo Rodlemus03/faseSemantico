@@ -5,6 +5,8 @@ from antlr4 import ParserRuleContext
 from .scope import Scope
 from .symbols import VarSymbol, ParamSymbol, FunctionSymbol, ClassSymbol
 from .types import *
+import re
+
 
 
 class SemanticChecker(ParseTreeVisitor):
@@ -75,6 +77,7 @@ class SemanticChecker(ParseTreeVisitor):
                 res = r
         return res
 
+
     def visitTerminal(self, node: TerminalNode):
         t = node.getText()
 
@@ -82,11 +85,15 @@ class SemanticChecker(ParseTreeVisitor):
         if len(t) >= 2 and t[0] == '"' and t[-1] == '"':
             return STR
 
-        # Boolean
+        # boolean / null
         if t == "true" or t == "false":
             return BOOL
         if t == "null":
             return NULL
+
+        # float: dígitos '.' dígitos
+        if re.fullmatch(r"\d+\.\d+", t):
+            return FLOAT
 
         # integer
         if t.isdigit():
@@ -97,6 +104,7 @@ class SemanticChecker(ParseTreeVisitor):
             return sym.type
 
         return None
+
 
     def err(self, ctx: ParserRuleContext, message: str):
         tok = ctx.start
@@ -709,12 +717,14 @@ class SemanticChecker(ParseTreeVisitor):
                 args_t = [self.visit(e) or NULL for e in arg_nodes]
 
                 params = callee_sym.params
+                who = callee_sym.name
                 if len(params) != len(args_t):
-                    self.err(op, f"Número de argumentos incompatible: se esperaban {len(params)} y se pasaron {len(args_t)}.")
+                    self.err(op, f"La función '{who}' espera {len(params)} argumentos; recibió {len(args_t)}.")
                 else:
                     for i, (p, a) in enumerate(zip(params, args_t), 1):
                         if not p.type.is_compatible(a):
-                            self.err(op, f"Argumento {i} incompatible: se esperaba {p.type} y se pasó {a}.")
+                            self.err(op, f"Argumento {i} de '{who}' debe ser {p.type}; recibió {a}.")
+
 
                 callee_sym = None
                 continue
@@ -774,10 +784,61 @@ class SemanticChecker(ParseTreeVisitor):
         if ctor:
             params = ctor.params
             if len(params) != len(args_t):
-                self.err(ctx, f"Constructor de '{class_name}' espera {len(params)} argumentos y se pasaron {len(args_t)}.")
+                self.err(ctx, f"El constructor de '{class_name}' espera {len(params)} argumentos; recibió {len(args_t)}.")
             else:
                 for i, (p, a) in enumerate(zip(params, args_t), 1):
                     if not p.type.is_compatible(a):
-                        self.err(ctx, f"Argumento {i} incompatible para constructor: se esperaba {p.type} y se pasó {a}.")
+                        self.err(ctx, f"Argumento {i} del constructor de '{class_name}' debe ser {p.type}; recibió {a}.")
+
 
         return ClassType(class_name)
+    
+
+    # -------- BLOQUES -------
+    def visitBlock(self, ctx):
+        # Crear nuevo scope
+        old_scope = self.scope
+        self.scope = Scope(parent=old_scope)
+
+        terminated = False
+        for st in getattr(ctx, "statement", lambda: [])():
+            if terminated:
+                self.err(st, "Código muerto: no se puede ejecutar después de una sentencia que termina el flujo.")
+            # Visita el statement
+            self.visit(st)
+            if self._is_terminal_stmt(st):
+                terminated = True
+
+        # Cerrar scope del bloque
+        self.scope = old_scope
+        return None
+
+
+    # -------- Literales de arreglos --------
+    def visitArrayLiteral(self, ctx):
+        exprs = getattr(ctx, "expression", lambda: [])()
+        exprs = exprs if isinstance(exprs, list) else [exprs] if exprs else []
+        if not exprs:
+            return ArrayType(NULL)
+
+        elem_types = [self.visit(e) or NULL for e in exprs]
+        base = elem_types[0]
+        for i, t in enumerate(elem_types[1:], start=2):
+            if not base.is_compatible(t):
+                self.err(ctx, f"Arreglo heterogéneo: elemento {i} es {t}, esperado {base}.")
+                return ArrayType(base)
+        return ArrayType(base)
+    
+    def visitSwitchStatement(self, ctx):
+        cond_t = self.visit(ctx.expression())
+        if not isinstance(cond_t, IntegerType):
+            self.err(ctx, f"La condición de 'switch' debe ser integer; recibió {cond_t}.")
+
+        for case in getattr(ctx, "switchCase", lambda: [])():
+            ce = getattr(case, "expression", lambda: None)()
+            if ce:
+                ct = self.visit(ce)
+                if not cond_t.is_compatible(ct):
+                    self.err(case, f"El 'case' debe ser {cond_t}; recibió {ct}.")
+        return None
+
