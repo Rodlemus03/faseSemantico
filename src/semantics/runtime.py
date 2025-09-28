@@ -1,30 +1,53 @@
-
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+def size_of(t) -> int:
+    name = getattr(t, "name", "").lower()
+    if name in ("integer", "int", "bool", "boolean"): return 4
+    if name in ("float", "double"): return 8
+    if name in ("string",): return 8  
+    return 4
+
+def align_to(n: int, k: int) -> int:
+    r = n % k
+    return n if r == 0 else n + (k - r)
 
 @dataclass
 class VarInfo:
     name: str
-    size: int = 1
-    offset: int = 0     
+    size: int = 4         
+    offset: int = 0       
 
 @dataclass
 class FrameLayout:
     func_name: str
-    params: Dict[str, VarInfo] = field(default_factory=dict)
-    locals: Dict[str, VarInfo] = field(default_factory=dict)
-    frame_size: int = 0  # total locals size (positive integer)
+    params: Dict[str, VarInfo] = field(default_factory=dict)  
+    locals: Dict[str, VarInfo] = field(default_factory=dict)  
+    params_size: int = 0
+    locals_size: int = 0
+    frame_size: int = 0  
 
-    def add_param(self, name: str, size: int = 1) -> None:
-        # Example convention: params at positive offsets (starting at +2 to skip RA, DL)
-        base = 2
-        idx = len(self.params)
-        self.params[name] = VarInfo(name=name, size=size, offset=base + idx)
+    def add_param(self, sym) -> None:
+        base = 8
+        off = base + sum(v.size for v in self.params.values())
+        w = getattr(sym, "width", None) or size_of(getattr(sym, "type", None))
+        sym.width = w
+        sym.is_param = True
+        sym.storage = "param"
+        sym.offset = off
+        self.params[sym.name] = VarInfo(name=sym.name, size=w, offset=off)
 
-    def add_local(self, name: str, size: int = 1) -> None:
-        # Locals grow negatively from FP-1, FP-2, ...
-        self.frame_size += size
-        self.locals[name] = VarInfo(name=name, size=size, offset=-self.frame_size)
+    def add_local(self, sym) -> None:
+        w = getattr(sym, "width", None) or size_of(getattr(sym, "type", None))
+        sym.width = w
+        sym.storage = "local"
+        self.locals_size += w
+        sym.offset = -self.locals_size
+        self.locals[sym.name] = VarInfo(name=sym.name, size=w, offset=sym.offset)
+
+    def finalize(self) -> None:
+        self.params_size = sum(v.size for v in self.params.values())
+        self.frame_size = align_to(self.locals_size + 8, 8)
 
 @dataclass
 class RuntimeLayouts:
