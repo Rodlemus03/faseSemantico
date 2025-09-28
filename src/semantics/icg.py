@@ -1,26 +1,23 @@
-
 from typing import Optional, List
 from antlr4 import ParserRuleContext, TerminalNode
 from antlr4 import ParseTreeVisitor
 
-
 from .ir import TACProgram
 from .temp import TempPool
 from .runtime import RuntimeLayouts
+from .symbols import FunctionSymbol, VarSymbol, ParamSymbol
+
 
 class CodeGen(ParseTreeVisitor):
-    """
-    A reasonably grammar-agnostic ICG for Compiscript that relies on a few helper
-    methods expected to exist on the grammar contexts, similar to the user's SemanticChecker.
-    """
+
     def __init__(self, resolver=None):
         self.prog = TACProgram()
         self.temps = TempPool()
         self.layouts = RuntimeLayouts()
         self.current_function: Optional[str] = None
-        self.resolver = resolver  # object with .resolve(name)->symbol (optional)
+        self.resolver = resolver  
+        self.func_ret_idx: Optional[int] = None  
 
-    # ---------- utilities reused from the user's style ----------
     def _expr_child(self, ctx, idx=0):
         if ctx is None or not hasattr(ctx, "expression"):
             return None
@@ -35,14 +32,14 @@ class CodeGen(ParseTreeVisitor):
         ex = ctx.expression()
         return ex if isinstance(ex, list) else [ex]
 
-    # ---------- entry points ----------
+    def _gen_expr(self, ctx):
+        return self.visit(ctx)
+
     def generate(self, tree) -> TACProgram:
         self.visit(tree)
         return self.prog
 
-    # ---------- program / statements ----------
     def visitProgram(self, ctx):
-        # emit an entry label for clarity
         self.prog.label("program_start")
         for st in getattr(ctx, "statement", lambda: [])():
             self.visit(st)
@@ -60,8 +57,19 @@ class CodeGen(ParseTreeVisitor):
         return None
 
     def visitVariableDeclaration(self, ctx):
-        # let x [:type] = expr
         name = ctx.Identifier().getText()
+
+        if self.current_function:
+            sym = None
+            if self.resolver:
+                try:
+                    sym = self.resolver.resolve(name)
+                except Exception:
+                    sym = None
+            if sym is None:
+                sym = VarSymbol(name=name, type=None)
+            self.layouts.frame(self.current_function).add_local(sym)
+
         init = None
         if hasattr(ctx, "initializer") and ctx.initializer():
             init = self._expr_child(ctx.initializer(), 0)
@@ -69,11 +77,9 @@ class CodeGen(ParseTreeVisitor):
             v = self._gen_expr(init)
             self.prog.emit("MOV", self._as_operand(v), None, name)
             self._release_if_temp(v)
-        # else: uninitialized -> nothing to emit
         return None
 
     def visitAssignment(self, ctx):
-        # x = expr
         if ctx.getChildCount() >= 2 and getattr(ctx.getChild(1), "getText", lambda: "")() == "=":
             ident = ctx.Identifier()
             if isinstance(ident, list) and ident:
@@ -85,11 +91,9 @@ class CodeGen(ParseTreeVisitor):
             self.prog.emit("MOV", self._as_operand(v), None, name)
             self._release_if_temp(v)
             return None
-        # obj.prop = expr -> desugar as MOV obj.prop, rhs
+
         exprs = self._expr_all(ctx)
         if exprs and len(exprs) >= 2:
-            # NOTE: object properties lowering is IR-design dependent.
-            # We encode as MOV <obj>.<prop>, <val>
             rhs_node = exprs[-1]
             obj_node = exprs[0]
             prop_name = None
@@ -107,58 +111,156 @@ class CodeGen(ParseTreeVisitor):
 
     def visitIfStatement(self, ctx):
         cond = self._gen_expr(ctx.expression())
-        L_else = self.prog.label()  # reserve name only
-        L_end  = self.prog.label()
-        # remove the immediate emission: label() also emits, but we just need names; workaround:
-        # We'll generate fresh names instead:
         L_else = self._fresh_label()
-        L_end  = self._fresh_label()
+        L_end = self._fresh_label()
 
         self.prog.emit("IFZ", self._as_operand(cond), None, L_else)
         self._release_if_temp(cond)
+
         self.visit(ctx.block(0))
         self.prog.emit("JUMP", L_end)
         self.prog.emit("LABEL", L_else)
+
         if ctx.block(1):
             self.visit(ctx.block(1))
+
         self.prog.emit("LABEL", L_end)
         return None
 
     def visitWhileStatement(self, ctx):
         L_cond = self._fresh_label()
-        L_end  = self._fresh_label()
+        L_end = self._fresh_label()
+
         self.prog.emit("LABEL", L_cond)
         cond = self._gen_expr(ctx.expression())
         self.prog.emit("IFZ", self._as_operand(cond), None, L_end)
         self._release_if_temp(cond)
+
         self.visit(ctx.block())
         self.prog.emit("JUMP", L_cond)
         self.prog.emit("LABEL", L_end)
         return None
 
-    def visitReturnStatement(self, ctx):
-        v = None
-        if hasattr(ctx, "expression") and ctx.expression():
-            v = self._gen_expr(ctx.expression())
-            self.prog.emit("RET", self._as_operand(v))
-            self._release_if_temp(v)
+    def visitFunctionDeclaration(self, ctx):
+        name = ctx.Identifier().getText()
+        self.current_function = name
+
+        func_sym: Optional[FunctionSymbol] = None
+        if self.resolver:
+            try:
+                func_sym = self.resolver.resolve(name)
+            except Exception:
+                func_sym = None
+
+        entry_lbl = f"func_{name}"
+        exit_lbl = f"{name}_exit"
+        if func_sym:
+            func_sym.entry_label = entry_lbl
+            func_sym.exit_label = exit_lbl
+
+        self.prog.emit("LABEL", entry_lbl)
+
+        fl = self.layouts.frame(name)
+
+        if ctx.parameters():
+            for i, p in enumerate(ctx.parameters().parameter()):
+                p_name = p.Identifier().getText()
+                sym = None
+                if self.resolver:
+                    try:
+                        sym = self.resolver.resolve(p_name)
+                    except Exception:
+                        sym = None
+                if isinstance(sym, VarSymbol):
+                    sym.is_param = True
+                    sym.param_index = i
+                fl.add_param(sym if sym else VarSymbol(name=p_name, type=None))
+
+        enter_idx = len(self.prog.code)
+        self.prog.emit("ENTER", 0)  
+
+        self.func_ret_idx = None
+
+        self.visit(ctx.block())
+
+        fl.finalize()
+        if func_sym:
+            func_sym.frame_size = fl.frame_size
+        self.prog.code[enter_idx].a1 = str(fl.frame_size)
+
+        self.prog.emit("LABEL", exit_lbl)
+        self.prog.emit("LEAVE")
+
+        if self.func_ret_idx is not None:
+            self.prog.emit("RET", f"t{self.func_ret_idx}")
+            self.temps.release(self.func_ret_idx)
         else:
             self.prog.emit("RET")
+
+        self.current_function = None
+        self.func_ret_idx = None
         return None
 
-    # ---------- expressions ----------
+    def visitReturnStatement(self, ctx):
+        if hasattr(ctx, "expression") and ctx.expression():
+            v = self._gen_expr(ctx.expression())
+            if self.func_ret_idx is None:
+                self.func_ret_idx = self.temps.get()
+            ret_name = self._temp_name(self.func_ret_idx)
+            self.prog.emit("MOV", self._as_operand(v), None, ret_name)
+            self._release_if_temp(v)
+            self.prog.emit("JUMP", f"{self.current_function}_exit")
+        else:
+            self.prog.emit("JUMP", f"{self.current_function}_exit")
+        return None
+
     def visitExprNoAssign(self, ctx):
-        return self._gen_expr(ctx.conditionalExpr())
+
+        node = None
+        if hasattr(ctx, "conditionalExpr"):
+            try:
+                node = ctx.conditionalExpr()
+            except Exception:
+                node = None
+        if node is None and hasattr(ctx, "logicalOrExpr"):
+            try:
+                node = ctx.logicalOrExpr()
+            except Exception:
+                node = None
+        if node is None:
+            return None
+        return self._gen_expr(node)
+
 
     def visitTernaryExpr(self, ctx):
-        # cond ? e1 : e2
-        cond_t = self._gen_expr(ctx.logicalOrExpr())
+
+        e0 = None
+        e1 = None
+        try:
+            e0 = ctx.expression(0)
+            e1 = ctx.expression(1)
+        except Exception:
+            e0 = e1 = None
+
+        if e0 is None or e1 is None:
+            if hasattr(ctx, "logicalOrExpr"):
+                return self._gen_expr(ctx.logicalOrExpr())
+            return None
+
+        cond_node = None
+        if hasattr(ctx, "logicalOrExpr"):
+            cond_node = ctx.logicalOrExpr()
+        else:
+            return self._gen_expr(e0) 
+
+        cond_t = self._gen_expr(cond_node)
         L_false = self._fresh_label()
         L_end   = self._fresh_label()
+
         self.prog.emit("IFZ", self._as_operand(cond_t), None, L_false)
         self._release_if_temp(cond_t)
 
-        t1 = self._gen_expr(ctx.expression(0))
+        t1 = self._gen_expr(e0)
         res_idx = self.temps.get()
         res = self._temp_name(res_idx)
         self.prog.emit("MOV", self._as_operand(t1), None, res)
@@ -166,16 +268,23 @@ class CodeGen(ParseTreeVisitor):
         self.prog.emit("JUMP", L_end)
 
         self.prog.emit("LABEL", L_false)
-        t2 = self._gen_expr(ctx.expression(1))
+        t2 = self._gen_expr(e1)
         self.prog.emit("MOV", self._as_operand(t2), None, res)
         self._release_if_temp(t2)
 
         self.prog.emit("LABEL", L_end)
         return res_idx
 
+
     def visitAdditiveExpr(self, ctx):
-        # supports + and - with left-associativity
-        terms = [self._gen_expr(ctx.multiplicativeExpr(i)) for i in range(len(ctx.multiplicativeExpr()))]
+        mlist = []
+        try:
+            mlist = ctx.multiplicativeExpr()
+        except Exception:
+            mlist = []
+        terms = [self._gen_expr(m) for m in mlist] if mlist else []
+        if not terms:
+            return None if not hasattr(ctx, "multiplicativeExpr") else self._gen_expr(ctx.multiplicativeExpr(0))
         ops = [ctx.getChild(i).getText() for i in range(1, ctx.getChildCount(), 2)]
         if not ops:
             return terms[0]
@@ -185,8 +294,14 @@ class CodeGen(ParseTreeVisitor):
         return acc
 
     def visitRelationalExpr(self, ctx):
-        # Lower <, <=, >, >=, ==, != into CMP+conditional set (represented as op with two args -> temp)
-        exprs = [self._gen_expr(ctx.additiveExpr(i)) for i in range(len(ctx.additiveExpr()))]
+        alist = []
+        try:
+            alist = ctx.additiveExpr()
+        except Exception:
+            alist = []
+        exprs = [self._gen_expr(a) for a in alist] if alist else []
+        if not exprs:
+            return None
         ops = [ctx.getChild(i).getText() for i in range(1, ctx.getChildCount(), 2)]
         if not ops:
             return exprs[0]
@@ -195,21 +310,23 @@ class CodeGen(ParseTreeVisitor):
             acc = self._emit_cmp(op, acc, rhs)
         return acc
 
+
     def visitLogicalAndExpr(self, ctx):
-        # short-circuit: a && b
         if len(ctx.children) == 1:
             return self.visit(ctx.equalityExpr(0))
         res_idx = self.temps.get()
         res = self._temp_name(res_idx)
         L_false = self._fresh_label()
-        L_end   = self._fresh_label()
+        L_end = self._fresh_label()
 
         left = self.visit(ctx.equalityExpr(0))
         self.prog.emit("IFZ", self._as_operand(left), None, L_false)
         self._release_if_temp(left)
+
         right = self.visit(ctx.equalityExpr(1))
         self.prog.emit("MOV", self._as_operand(right), None, res)
         self._release_if_temp(right)
+
         self.prog.emit("JUMP", L_end)
         self.prog.emit("LABEL", L_false)
         self.prog.emit("MOV", "0", None, res)
@@ -217,21 +334,23 @@ class CodeGen(ParseTreeVisitor):
         return res_idx
 
     def visitLogicalOrExpr(self, ctx):
-        # short-circuit: a || b
+        # corto circuito: a || b
         if len(ctx.children) == 1:
             return self.visit(ctx.logicalAndExpr(0))
         res_idx = self.temps.get()
         res = self._temp_name(res_idx)
         L_true = self._fresh_label()
-        L_end  = self._fresh_label()
+        L_end = self._fresh_label()
 
         left = self.visit(ctx.logicalAndExpr(0))
         # if left != 0 goto L_true
         self.prog.emit("IFNZ", self._as_operand(left), None, L_true)
         self._release_if_temp(left)
+
         right = self.visit(ctx.logicalAndExpr(1))
         self.prog.emit("MOV", self._as_operand(right), None, res)
         self._release_if_temp(right)
+
         self.prog.emit("JUMP", L_end)
         self.prog.emit("LABEL", L_true)
         self.prog.emit("MOV", "1", None, res)
@@ -240,47 +359,20 @@ class CodeGen(ParseTreeVisitor):
 
     # ---------- primaries / function calls ----------
     def visitLeftHandSide(self, ctx):
-        # Handle chained . and () and [] similar to SemanticChecker but produce temps
-        # For now, only simple identifiers and function calls are lowered.
+        # Por ahora: identificadores simples y literales via visitTerminal
         pa = ctx.primaryAtom()
         ident_node = None
         if hasattr(pa, "Identifier") and pa.Identifier():
             ident_node = pa.Identifier()
             name = ident_node[0].getText() if isinstance(ident_node, list) else ident_node.getText()
-            return name  # variable name as operand
-        # literals go through visitTerminal
+            return name  # nombre de variable como operando
         return self.visit(pa)
 
     def visitTerminal(self, node: TerminalNode):
-        t = node.getText()
-        # Keep literals as immediates
-        return t
+        # literales como inmediatos
+        return node.getText()
 
-    def visitFunctionDeclaration(self, ctx):
-        name = ctx.Identifier().getText()
-        self.prog.emit("LABEL", f"func_{name}")
-        self.current_function = name
-
-        # Build basic frame layout: params then locals (discovered during walk)
-        # Params
-        if ctx.parameters():
-            for p in ctx.parameters().parameter():
-                self.layouts.frame(name).add_param(p.Identifier().getText())
-
-        # Visit body; locals will be added by variableDeclaration inside functions
-        self.visit(ctx.block())
-
-        self.prog.emit("RET")  # implicit return if none
-        self.current_function = None
-        return None
-
-    def visitBlock(self, ctx):
-        # In a real implementation, we'd open a scope. For IR we only care about locals allocation.
-        for st in getattr(ctx, "statement", lambda: [])():
-            self.visit(st)
-        return None
-
-    # ---------- helpers ----------
+    # ---------- binarios / comparaciones ----------
     def _emit_bin(self, op, left, right):
         idx = self.temps.get()
         res = self._temp_name(idx)
@@ -298,6 +390,7 @@ class CodeGen(ParseTreeVisitor):
         self._release_if_temp(right)
         return idx
 
+    # ---------- utilidades ----------
     def _as_operand(self, x):
         if isinstance(x, int):
             return self._temp_name(x)
@@ -311,6 +404,6 @@ class CodeGen(ParseTreeVisitor):
             self.temps.release(x)
 
     def _fresh_label(self) -> str:
-        # piggyback on TACProgram counter by emitting a dummy label name
+        # Nombre nuevo basado en la cantidad de LABEL ya emitidos
         n = len([i for i in self.prog.code if i.op == "LABEL"])
         return f"L{n}"
