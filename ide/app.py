@@ -3,6 +3,8 @@ import streamlit as st
 from streamlit_ace import st_ace
 from antlr4 import InputStream, CommonTokenStream
 
+st.set_page_config(page_title="Compiscript IDE", page_icon="🧪", layout="wide")
+
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.append(os.path.join(ROOT, "program"))
 sys.path.append(os.path.join(ROOT, "src"))
@@ -13,10 +15,12 @@ from semantics.errors import SyntaxErrorListener
 from semantics.checker import SemanticChecker
 from semantics.treeviz import render_parse_tree_svg
 
+icg_import_error = None
 try:
-    from semantics.icg import ICG
-except Exception:
+    from semantics.icg import CodeGen as ICG  
+except Exception as e:
     ICG = None
+    icg_import_error = e  
 
 def _format_tac_fallback(tac) -> str:
     lines = []
@@ -60,8 +64,10 @@ y = suma(x, 5);
 if (y > 10) { print("Mayor a 10"); } else { print("Menor o igual"); }
 """
 
-st.set_page_config(page_title="Compiscript IDE", page_icon="🧪", layout="wide")
 st.title("Compiscript IDE - Análisis Sintáctico y Semántico")
+
+if icg_import_error:
+    st.warning(f"ICG no está disponible (no se pudo importar): {icg_import_error}")
 
 if "code" not in st.session_state:
     st.session_state.code = DEFAULT_CODE
@@ -96,6 +102,7 @@ if run:
     st.session_state.code = code or ""
     input_stream = InputStream(st.session_state.code)
 
+    # --- Parsing ---
     lexer = CompiscriptLexer(input_stream)
     tokens = CommonTokenStream(lexer)
     parser = CompiscriptParser(tokens)
@@ -133,8 +140,8 @@ if run:
                         symtab = getattr(checker, "global_scope", None)
 
                     try:
-                        icg = ICG(symtab)
-                        tac = icg.generate(tree)  #
+                        icg = ICG(symtab)   
+                        tac = icg.generate(tree)
                         st.subheader("Código Intermedio (TAC)")
                         st.code(format_tac(tac), language="text")
                     except Exception as ex:
