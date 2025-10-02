@@ -1,0 +1,153 @@
+0000: LABEL        program_start              
+0001: LABEL        func_toString              
+0002: ENTER        8                         
+0003: MOV          ""                        t0
+0004: JUMP         toString_exit              
+0005: LABEL        toString_exit              
+0006: LEAVE                                  
+0007: RET          t0                        
+0008: LABEL        func_constructor              
+0009: ENTER        8                         
+0010: MOVP         nombre       this         nombre
+0011: MOVP         edad         this         edad
+0012: MOVP         "rojo"       this         color
+0013: LABEL        constructor_exit              
+0014: LEAVE                                  
+0015: RET                                    
+0016: LABEL        func_saludar              
+0017: ENTER        8                         
+0018: GETP         this         nombre       t0
+0019: ADD          "Hola, mi nombre es " t0           t1
+0020: MOV          t1                        t0
+0021: JUMP         saludar_exit              
+0022: LABEL        saludar_exit              
+0023: LEAVE                                  
+0024: RET          t0                        
+0025: LABEL        func_incrementarEdad              
+0026: ENTER        8                         
+0027: GETP         this         edad         t0
+0028: ADD          t0           anos         t1
+0029: MOVP         t1           this         edad
+0030: GETP         this         edad         t1
+0031: PARAM        t1                        
+0032: CALL         func_toString              t0
+0033: ADD          "Ahora tengo " t0           t1
+0034: ADD          t1           " años."     t0
+0035: MOV          t0                        t1
+0036: JUMP         incrementarEdad_exit              
+0037: LABEL        incrementarEdad_exit              
+0038: LEAVE                                  
+0039: RET          t1                        
+0040: LABEL        func_constructor              
+0041: ENTER        8                         
+0042: MOVP         nombre       this         nombre
+0043: MOVP         edad         this         edad
+0044: MOVP         "rojo"       this         color
+0045: MOVP         grado        this         grado
+0046: LABEL        constructor_exit              
+0047: LEAVE                                  
+0048: RET                                    
+0049: LABEL        func_estudiar              
+0050: ENTER        8                         
+0051: GETP         this         nombre       t1
+0052: GETP         this         grado        t0
+0053: PARAM        t0                        
+0054: CALL         func_toString              t2
+0055: ADD          t1           " está estudiando en " t0
+0056: ADD          t0           t2           t1
+0057: ADD          t1           " grado."    t2
+0058: MOV          t2                        t1
+0059: JUMP         estudiar_exit              
+0060: LABEL        estudiar_exit              
+0061: LEAVE                                  
+0062: RET          t1                        
+0063: LABEL        func_promedioNotas              
+0064: ENTER        16                        
+0065: ADD          nota1        nota2        t1
+0066: ADD          t1           nota3        t2
+0067: DIV          t2           3            t1
+0068: MOV          t1                        promedio
+0069: MOV          promedio                  t1
+0070: JUMP         promedioNotas_exit              
+0071: LABEL        promedioNotas_exit              
+0072: LEAVE                                  
+0073: RET          t1                        
+0074: MOV          ""                        log
+0075: MOV          "Erick"                   nombre
+0076: NEW          Estudiante                t1
+0077: PARAM        t1                        
+0078: PARAM        nombre                    
+0079: PARAM        20                        
+0080: PARAM        3                         
+0081: CALL         func_constructor              
+0082: MOV          t1                        juan
+0083: GETP         juan         saludar      t1
+0084: PARAM        juan                      
+0085: CALL         func_saludar              t2
+0086: ADD          log          t2           t1
+0087: ADD          t1           "\n"         t2
+0088: MOV          t2                        log
+0089: GETP         juan         estudiar     t2
+0090: PARAM        juan                      
+0091: CALL         func_estudiar              t1
+0092: ADD          log          t1           t2
+0093: ADD          t2           "\n"         t1
+0094: MOV          t1                        log
+0095: GETP         juan         incrementarEdad t1
+0096: PARAM        juan                      
+0097: PARAM        5                         
+0098: CALL         func_incrementarEdad              t2
+0099: ADD          log          t2           t1
+0100: ADD          t1           "\n"         t2
+0101: MOV          t2                        log
+0102: MOV          1                         i
+0103: LABEL        L15                       
+0104: CMP<=        i            5            t2
+0105: IFZ          t2                        L15
+0106: MOD          i            2            t2
+0107: CMP==        t2           0            t1
+0108: IFZ          t1                        L16
+0109: PARAM        i                         
+0110: CALL         func_toString              t1
+0111: ADD          log          t1           t2
+0112: ADD          t2           " es par\n"  t1
+0113: MOV          t1                        log
+0114: JUMP         L16                       
+0115: LABEL        L16                       
+0116: PARAM        i                         
+0117: CALL         func_toString              t1
+0118: ADD          log          t1           t2
+0119: ADD          t2           " es impar\n" t1
+0120: MOV          t1                        log
+0121: LABEL        L16                       
+0122: ADD          i            1            t1
+0123: MOV          t1                        i
+0124: JUMP         L15                       
+0125: LABEL        L15                       
+0126: GETP         juan         edad         t1
+0127: MUL          t1           2            t2
+0128: SUB          5            3            t1
+0129: DIV          t1           2            t0
+0130: ADD          t2           t0           t1
+0131: MOV          t1                        resultado
+0132: PARAM        resultado                 
+0133: CALL         func_toString              t1
+0134: ADD          log          "Resultado de la expresión: " t0
+0135: ADD          t0           t1           t2
+0136: ADD          t2           "\n"         t1
+0137: MOV          t1                        log
+0138: MOV          0                         prom
+0139: GETP         juan         promedioNotas t1
+0140: PARAM        juan                      
+0141: PARAM        90                        
+0142: PARAM        85                        
+0143: PARAM        95                        
+0144: CALL         func_promedioNotas              t2
+0145: MOV          t2                        prom
+0146: PARAM        prom                      
+0147: CALL         func_toString              t2
+0148: ADD          log          "Promedio (entero): " t1
+0149: ADD          t1           t2           t0
+0150: ADD          t0           "\n"         t2
+0151: MOV          t2                        log
+0152: LABEL        program_end
