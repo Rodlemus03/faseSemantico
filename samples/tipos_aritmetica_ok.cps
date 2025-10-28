@@ -1,2 +1,2 @@
-let a: integer = 1 + 2 * 3;
-let b: float = 2.5 * 4 - 1.0;
+let a = 1 + 2 * 3;
+let b = 2 * 4 - 1;

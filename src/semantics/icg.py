@@ -15,8 +15,8 @@ class CodeGen(ParseTreeVisitor):
         self.temps = TempPool()
         self.layouts = RuntimeLayouts()
         self.current_function: Optional[str] = None
-        self.resolver = resolver  
-        self.func_ret_idx: Optional[int] = None  
+        self.resolver = resolver
+        self.func_ret_idx: Optional[int] = None
 
     def _expr_child(self, ctx, idx=0):
         if ctx is None or not hasattr(ctx, "expression"):
@@ -82,12 +82,12 @@ class CodeGen(ParseTreeVisitor):
     def visitAssignment(self, ctx):
         exprs = self._expr_all(ctx)
         idents = ctx.Identifier() if hasattr(ctx, "Identifier") else None
-        
+
         if not idents:
             return None
-        
+
         ident_list = idents if isinstance(idents, list) else [idents]
-        
+
         # Caso 1: Asignación simple (x = valor;)
         if len(ident_list) == 1 and len(exprs) == 1:
             name = ident_list[0].getText()
@@ -96,19 +96,19 @@ class CodeGen(ParseTreeVisitor):
             self.prog.emit("MOV", self._as_operand(v), None, name)
             self._release_if_temp(v)
             return None
-        
+
         # Caso 2: Asignación a propiedad (expr.prop = valor;)
         if len(exprs) >= 2 and len(ident_list) >= 1:
             obj_node = exprs[0]
             rhs_node = exprs[-1]
             prop_name = ident_list[-1].getText()
-            
+
             val = self._gen_expr(rhs_node)
             obj = self._gen_expr(obj_node)
             self.prog.emit("MOVP", self._as_operand(val), self._as_operand(obj), prop_name)
             self._release_if_temp(val)
             self._release_if_temp(obj)
-        
+
         return None
 
     def visitIfStatement(self, ctx):
@@ -179,7 +179,7 @@ class CodeGen(ParseTreeVisitor):
                 fl.add_param(sym if sym else VarSymbol(name=p_name, type=None))
 
         enter_idx = len(self.prog.code)
-        self.prog.emit("ENTER", 0)  
+        self.prog.emit("ENTER", 0)
 
         self.func_ret_idx = None
 
@@ -217,22 +217,20 @@ class CodeGen(ParseTreeVisitor):
         return None
 
     def visitAssignExpr(self, ctx):
-        """lhs = assignmentExpr"""
         lhs_result = self.visit(ctx.lhs)
         rhs_result = self.visit(ctx.assignmentExpr())
-        
+
         if isinstance(lhs_result, str):
             self.prog.emit("MOV", self._as_operand(rhs_result), None, lhs_result)
-        
+
         self._release_if_temp(rhs_result)
         return rhs_result
 
     def visitPropertyAssignExpr(self, ctx):
-        """lhs.Identifier = assignmentExpr"""
         obj_result = self.visit(ctx.lhs)
         prop_name = ctx.Identifier().getText()
         val_result = self.visit(ctx.assignmentExpr())
-        
+
         self.prog.emit("MOVP", self._as_operand(val_result), self._as_operand(obj_result), prop_name)
         self._release_if_temp(val_result)
         self._release_if_temp(obj_result)
@@ -243,10 +241,10 @@ class CodeGen(ParseTreeVisitor):
 
     def visitTernaryExpr(self, ctx):
         log_or = ctx.logicalOrExpr()
-        
+
         if not ctx.expression() or len(ctx.expression()) < 2:
             return self.visit(log_or)
-        
+
         cond_t = self.visit(log_or)
         L_false = self._fresh_label()
         L_end = self._fresh_label()
@@ -275,7 +273,7 @@ class CodeGen(ParseTreeVisitor):
             return None
         if len(terms) == 1:
             return terms[0]
-        
+
         ops = [ctx.getChild(i).getText() for i in range(1, ctx.getChildCount(), 2)]
         acc = terms[0]
         for op, rhs in zip(ops, terms[1:]):
@@ -288,7 +286,7 @@ class CodeGen(ParseTreeVisitor):
             return None
         if len(terms) == 1:
             return terms[0]
-        
+
         ops = [ctx.getChild(i).getText() for i in range(1, ctx.getChildCount(), 2)]
         acc = terms[0]
         for op, rhs in zip(ops, terms[1:]):
@@ -301,7 +299,7 @@ class CodeGen(ParseTreeVisitor):
             return None
         if len(exprs) == 1:
             return exprs[0]
-        
+
         ops = [ctx.getChild(i).getText() for i in range(1, ctx.getChildCount(), 2)]
         acc = exprs[0]
         for op, rhs in zip(ops, exprs[1:]):
@@ -314,7 +312,7 @@ class CodeGen(ParseTreeVisitor):
             return None
         if len(exprs) == 1:
             return exprs[0]
-        
+
         ops = [ctx.getChild(i).getText() for i in range(1, ctx.getChildCount(), 2)]
         acc = exprs[0]
         for op, rhs in zip(ops, exprs[1:]):
@@ -324,7 +322,7 @@ class CodeGen(ParseTreeVisitor):
     def visitLogicalAndExpr(self, ctx):
         if len(ctx.equalityExpr()) == 1:
             return self.visit(ctx.equalityExpr(0))
-        
+
         res_idx = self.temps.get()
         res = self._temp_name(res_idx)
         L_false = self._fresh_label()
@@ -347,7 +345,7 @@ class CodeGen(ParseTreeVisitor):
     def visitLogicalOrExpr(self, ctx):
         if len(ctx.logicalAndExpr()) == 1:
             return self.visit(ctx.logicalAndExpr(0))
-        
+
         res_idx = self.temps.get()
         res = self._temp_name(res_idx)
         L_true = self._fresh_label()
@@ -397,85 +395,84 @@ class CodeGen(ParseTreeVisitor):
         return ctx.getText()
 
     def visitLeftHandSide(self, ctx):
-
         primary = ctx.primaryAtom()
         suffix_ops = ctx.suffixOp() if hasattr(ctx, 'suffixOp') else []
-        
+
         if not suffix_ops and ctx.getChildCount() > 1:
             suffix_ops = []
             for i in range(1, ctx.getChildCount()):
                 child = ctx.getChild(i)
                 if hasattr(child, 'getRuleIndex'):
                     suffix_ops.append(child)
-        
+
         if not suffix_ops:
             return self.visit(primary)
-        
+
         return self._process_chain(primary, suffix_ops)
 
     def _process_chain(self, primary, suffixes):
         current = self.visit(primary)
         current_name = None
-        base_obj = current  
-        
+        base_obj = current
+
         if isinstance(current, str):
             current_name = current
-        
+
         for i, suffix in enumerate(suffixes):
             if self._is_property_access(suffix):
                 prop = suffix.Identifier().getText()
                 idx = self.temps.get()
                 res = self._temp_name(idx)
                 self.prog.emit("GETP", self._as_operand(current), prop, res)
-                
+
                 if current != base_obj:
                     self._release_if_temp(current)
-                    
+
                 current = idx
                 current_name = prop
-            
+
             elif self._is_call(suffix):
                 args = []
                 if suffix.arguments():
                     for arg_expr in suffix.arguments().expression():
                         arg_val = self.visit(arg_expr)
                         args.append(arg_val)
-                
+
                 idx = self.temps.get()
                 res = self._temp_name(idx)
-                
+
                 is_method = False
                 for j in range(i):
                     if self._is_property_access(suffixes[j]):
                         is_method = True
                         break
-                
-                if is_method and i > 0 and self._is_property_access(suffixes[i-1]):
+
+                if is_method and i > 0 and self._is_property_access(suffixes[i - 1]):
                     if i == 1:
                         self.prog.emit("PARAM", self._as_operand(base_obj))
                     else:
-                        prev_obj = self._get_object_before_method(primary, suffixes[:i-1])
+                        prev_obj = self._get_object_before_method(primary, suffixes[: i - 1])
                         self.prog.emit("PARAM", self._as_operand(prev_obj))
                         if isinstance(prev_obj, int):
                             self.temps.release(prev_obj)
-                    
+
                     for arg in args:
                         self.prog.emit("PARAM", self._as_operand(arg))
                         self._release_if_temp(arg)
-                    
+
                     self.prog.emit("CALL", f"func_{current_name}", None, res)
                 else:
                     for arg in args:
                         self.prog.emit("PARAM", self._as_operand(arg))
                         self._release_if_temp(arg)
-                    
+
                     func_name = current if isinstance(current, str) else current_name or "unknown"
                     self.prog.emit("CALL", f"func_{func_name}", None, res)
-                
+
                 self._release_if_temp(current)
                 current = idx
                 current_name = None
-            
+
             elif self._is_index(suffix):
                 index_val = self.visit(suffix.expression())
                 idx = self.temps.get()
@@ -484,13 +481,13 @@ class CodeGen(ParseTreeVisitor):
                 self._release_if_temp(current)
                 self._release_if_temp(index_val)
                 current = idx
-        
+
         return current
 
     def _get_object_before_method(self, primary, suffixes_before):
         if not suffixes_before:
             return self.visit(primary)
-        
+
         current = self.visit(primary)
         for suffix in suffixes_before:
             if self._is_property_access(suffix):
@@ -500,7 +497,7 @@ class CodeGen(ParseTreeVisitor):
                 self.prog.emit("GETP", self._as_operand(current), prop, res)
                 self._release_if_temp(current)
                 current = idx
-        
+
         return current
 
     def _is_property_access(self, ctx):
@@ -512,11 +509,11 @@ class CodeGen(ParseTreeVisitor):
                     if ctx.getChild(i).getText() == '(':
                         return False
             return True
-        
+
         if ctx.getChildCount() >= 2:
             if ctx.getChild(0).getText() == '.' and hasattr(ctx, 'Identifier'):
                 return True
-        
+
         return False
 
     def _is_call(self, ctx):
@@ -525,8 +522,8 @@ class CodeGen(ParseTreeVisitor):
         return ctx.getChildCount() >= 2 and ctx.getChild(0).getText() == '('
 
     def _is_index(self, ctx):
-        return (hasattr(ctx, 'expression') and 
-                ctx.getChildCount() >= 2 and 
+        return (hasattr(ctx, 'expression') and
+                ctx.getChildCount() >= 2 and
                 ctx.getChild(0).getText() == '[')
 
     def visitIdentifierExpr(self, ctx):
@@ -534,20 +531,20 @@ class CodeGen(ParseTreeVisitor):
 
     def visitNewExpr(self, ctx):
         class_name = ctx.Identifier().getText()
-        
+
         args = []
         if ctx.arguments():
             args = [self.visit(e) for e in ctx.arguments().expression()]
-        
+
         obj_idx = self.temps.get()
         obj_temp = self._temp_name(obj_idx)
         self.prog.emit("NEW", class_name, None, obj_temp)
-        
+
         self.prog.emit("PARAM", obj_temp)
         for arg in args:
             self.prog.emit("PARAM", self._as_operand(arg))
             self._release_if_temp(arg)
-        
+
         self.prog.emit("CALL", "func_constructor", None, None)
         return obj_idx
 
@@ -558,9 +555,9 @@ class CodeGen(ParseTreeVisitor):
         idx = self.temps.get()
         res = self._temp_name(idx)
         ir_op = {
-            "+": "ADD", 
-            "-": "SUB", 
-            "*": "MUL", 
+            "+": "ADD",
+            "-": "SUB",
+            "*": "MUL",
             "/": "DIV",
             "%": "MOD"
         }.get(op, f"BIN_{op}")

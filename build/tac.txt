@@ -1,0 +1,8 @@
+program_start:
+MUL	2	3	t0
+ADD	1	t0	t1
+MOV	t1		a
+MUL	2	4	t1
+SUB	t1	1	t0
+MOV	t0		b
+program_end:
