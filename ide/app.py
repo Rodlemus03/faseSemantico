@@ -76,7 +76,7 @@ with st.sidebar:
     st.subheader("Opciones")
     gen_tac = st.toggle("Generar TAC", value=True, help="Muestra el código intermedio si no hay errores.")
     st.divider()
-    st.subheader("Icono para éxito (opcional)")
+    st.subheader("Icono para éxito")
     ok_up = st.file_uploader(
         "Imagen (png/jpg/webp/gif)",
         type=["png","jpg","jpeg","webp","gif"],
