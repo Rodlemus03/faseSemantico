@@ -17,6 +17,7 @@ class CodeGen(ParseTreeVisitor):
         self.current_function: Optional[str] = None
         self.resolver = resolver
         self.func_ret_idx: Optional[int] = None
+        self.label_counter = 0
 
     def _expr_child(self, ctx, idx=0):
         if ctx is None or not hasattr(ctx, "expression"):
@@ -587,5 +588,6 @@ class CodeGen(ParseTreeVisitor):
             self.temps.release(x)
 
     def _fresh_label(self) -> str:
-        n = len([i for i in self.prog.code if i.op == "LABEL"])
-        return f"L{n}"
+        label = f"L{self.label_counter}"
+        self.label_counter += 1
+        return label
