@@ -17,6 +17,7 @@ class CodeGen(ParseTreeVisitor):
         self.current_function: Optional[str] = None
         self.resolver = resolver
         self.func_ret_idx: Optional[int] = None
+        self.current_class: Optional[str] = None  
         self.label_counter = 0
 
     def _expr_child(self, ctx, idx=0):
@@ -89,7 +90,6 @@ class CodeGen(ParseTreeVisitor):
 
         ident_list = idents if isinstance(idents, list) else [idents]
 
-        # Caso 1: Asignación simple (x = valor;)
         if len(ident_list) == 1 and len(exprs) == 1:
             name = ident_list[0].getText()
             rhs = exprs[0]
@@ -98,7 +98,6 @@ class CodeGen(ParseTreeVisitor):
             self._release_if_temp(v)
             return None
 
-        # Caso 2: Asignación a propiedad (expr.prop = valor;)
         if len(exprs) >= 2 and len(ident_list) >= 1:
             obj_node = exprs[0]
             rhs_node = exprs[-1]
@@ -155,8 +154,12 @@ class CodeGen(ParseTreeVisitor):
             except Exception:
                 func_sym = None
 
-        entry_lbl = f"func_{name}"
-        exit_lbl = f"{name}_exit"
+        if name == "constructor" and self.current_class:
+            entry_lbl = f"func_{self.current_class}_constructor"
+            exit_lbl = f"{self.current_class}_constructor_exit"
+        else:
+            entry_lbl = f"func_{name}"
+            exit_lbl = f"{name}_exit"
         if func_sym:
             func_sym.entry_label = entry_lbl
             func_sym.exit_label = exit_lbl
@@ -293,7 +296,16 @@ class CodeGen(ParseTreeVisitor):
         for op, rhs in zip(ops, terms[1:]):
             acc = self._emit_bin(op, acc, rhs)
         return acc
-
+    def visitClassDeclaration(self, ctx):
+        class_name = ctx.Identifier(0).getText()
+        self.current_class = class_name
+        
+        if hasattr(ctx, 'classMember'):
+            for member in ctx.classMember():
+                self.visit(member)
+        
+        self.current_class = None
+        return None
     def visitEqualityExpr(self, ctx):
         exprs = [self.visit(r) for r in ctx.relationalExpr()]
         if not exprs:
@@ -546,7 +558,8 @@ class CodeGen(ParseTreeVisitor):
             self.prog.emit("PARAM", self._as_operand(arg))
             self._release_if_temp(arg)
 
-        self.prog.emit("CALL", "func_constructor", None, None)
+        constructor_label = f"func_{class_name}_constructor"  
+        self.prog.emit("CALL", constructor_label, None, None)
         return obj_idx
 
     def visitThisExpr(self, ctx):
