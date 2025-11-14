@@ -1,7 +1,7 @@
 from typing import Dict, List, Optional, Set, Tuple
 from .ir import TACProgram, TACInstr
 
-# CONSTANTES MIPS 
+# ==================== CONSTANTES MIPS ====================
 
 TEMP_REGS = [f"$t{i}" for i in range(8)]  
 SAVED_REGS = [f"$s{i}" for i in range(8)]  
@@ -17,8 +17,15 @@ REG_T9 = "$t9"
 
 WORD_SIZE = 4
 
+FIELD_OFFSETS = {
+    "nombre": 0,
+    "edad": 4,
+    "color": 8,
+    "grado": 12,
+}
 
-# REGISTER ALLOCATOR 
+
+# ==================== REGISTER ALLOCATOR ====================
 
 class RegisterDescriptor:
     def __init__(self):
@@ -141,7 +148,7 @@ class RegisterAllocator:
         return s.isdigit() or (s.startswith('-') and s[1:].isdigit())
 
 
-# STACK FRAME MANAGER 
+# ==================== STACK FRAME MANAGER ====================
 
 class StackFrame:
     def __init__(self, function_name: str):
@@ -228,7 +235,7 @@ class StackFrameManager:
         return []
 
 
-# DATA SECTION 
+# ==================== DATA SECTION ====================
 
 class DataSection:
     def __init__(self):
@@ -252,7 +259,7 @@ class DataSection:
             return lines
         lines.append(".data")
         for content, label in self.strings.items():
-            escaped = content.replace('\\', '\\\\').replace('"', '\\"')
+            escaped = content.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
             lines.append(f'{label}: .asciiz "{escaped}"')
         for var_name, value in self.globals.items():
             lines.append(f'{var_name}: .word {value}')
@@ -260,7 +267,7 @@ class DataSection:
         return lines
 
 
-# INSTRUCTION EMITTER 
+# ==================== INSTRUCTION EMITTER ====================
 
 class InstructionEmitter:
     def __init__(self, register_allocator, frame_manager, data_section):
@@ -299,87 +306,170 @@ class InstructionEmitter:
             return REG_T9
         return self.reg_alloc.get_reg(operand, for_write=False)
     
+    # ========== OPERACIONES ARITMÉTICAS ==========
+    
     def emit_add(self, a1: str, a2: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rb = self._ensure_in_reg(a2)
+        if self._is_literal(a1) and self._is_literal(a2):
+            self.emit(f"    li $t8, {a1}")
+            ra = "$t8"
+            self.emit(f"    li $t9, {a2}")
+            rb = "$t9"
+        else:
+            ra = self._ensure_in_reg(a1)
+            rb = self._ensure_in_reg(a2)
+        
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    addu {rd}, {ra}, {rb}")
-    
+
     def emit_sub(self, a1: str, a2: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rb = self._ensure_in_reg(a2)
+        if self._is_literal(a1) and self._is_literal(a2):
+            self.emit(f"    li $t8, {a1}")
+            ra = "$t8"
+            self.emit(f"    li $t9, {a2}")
+            rb = "$t9"
+        else:
+            ra = self._ensure_in_reg(a1)
+            rb = self._ensure_in_reg(a2)
+        
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    subu {rd}, {ra}, {rb}")
-    
+
     def emit_mul(self, a1: str, a2: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rb = self._ensure_in_reg(a2)
+        if self._is_literal(a1) and self._is_literal(a2):
+            self.emit(f"    li $t8, {a1}")
+            ra = "$t8"
+            self.emit(f"    li $t9, {a2}")
+            rb = "$t9"
+        else:
+            ra = self._ensure_in_reg(a1)
+            rb = self._ensure_in_reg(a2)
+        
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    mul {rd}, {ra}, {rb}")
-    
+
     def emit_div(self, a1: str, a2: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rb = self._ensure_in_reg(a2)
+        if self._is_literal(a1) and self._is_literal(a2):
+            self.emit(f"    li $t8, {a1}")
+            ra = "$t8"
+            self.emit(f"    li $t9, {a2}")
+            rb = "$t9"
+        else:
+            ra = self._ensure_in_reg(a1)
+            rb = self._ensure_in_reg(a2)
+        
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    div {ra}, {rb}")
         self.emit(f"    mflo {rd}")
-    
+
     def emit_mod(self, a1: str, a2: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rb = self._ensure_in_reg(a2)
+        if self._is_literal(a1) and self._is_literal(a2):
+            self.emit(f"    li $t8, {a1}")
+            ra = "$t8"
+            self.emit(f"    li $t9, {a2}")
+            rb = "$t9"
+        else:
+            ra = self._ensure_in_reg(a1)
+            rb = self._ensure_in_reg(a2)
+        
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    div {ra}, {rb}")
         self.emit(f"    mfhi {rd}")
-    
+
     def emit_neg(self, a1: str, result: str):
         ra = self._ensure_in_reg(a1)
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    subu {rd}, {REG_ZERO}, {ra}")
-    
+
     def emit_not(self, a1: str, result: str):
         ra = self._ensure_in_reg(a1)
         rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    sltu {rd}, {ra}, 1")
+        self.emit(f"    sltiu {rd}, {ra}, 1")
+    
+    # ========== COMPARACIONES ==========
     
     def emit_cmp_eq(self, a1: str, a2: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rb = self._ensure_in_reg(a2)
+        if self._is_literal(a1) and self._is_literal(a2):
+            self.emit(f"    li $t8, {a1}")
+            ra = "$t8"
+            self.emit(f"    li $t9, {a2}")
+            rb = "$t9"
+        else:
+            ra = self._ensure_in_reg(a1)
+            rb = self._ensure_in_reg(a2)
+        
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    xor {rd}, {ra}, {rb}")
         self.emit(f"    sltu {rd}, {rd}, 1")
-    
+
     def emit_cmp_ne(self, a1: str, a2: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rb = self._ensure_in_reg(a2)
+        if self._is_literal(a1) and self._is_literal(a2):
+            self.emit(f"    li $t8, {a1}")
+            ra = "$t8"
+            self.emit(f"    li $t9, {a2}")
+            rb = "$t9"
+        else:
+            ra = self._ensure_in_reg(a1)
+            rb = self._ensure_in_reg(a2)
+        
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    xor {rd}, {ra}, {rb}")
         self.emit(f"    sltu {rd}, {REG_ZERO}, {rd}")
-    
+
     def emit_cmp_lt(self, a1: str, a2: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rb = self._ensure_in_reg(a2)
+        if self._is_literal(a1) and self._is_literal(a2):
+            self.emit(f"    li $t8, {a1}")
+            ra = "$t8"
+            self.emit(f"    li $t9, {a2}")
+            rb = "$t9"
+        else:
+            ra = self._ensure_in_reg(a1)
+            rb = self._ensure_in_reg(a2)
+        
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    slt {rd}, {ra}, {rb}")
-    
+
     def emit_cmp_le(self, a1: str, a2: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rb = self._ensure_in_reg(a2)
+        if self._is_literal(a1) and self._is_literal(a2):
+            self.emit(f"    li $t8, {a1}")
+            ra = "$t8"
+            self.emit(f"    li $t9, {a2}")
+            rb = "$t9"
+        else:
+            ra = self._ensure_in_reg(a1)
+            rb = self._ensure_in_reg(a2)
+        
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    slt {rd}, {rb}, {ra}")
         self.emit(f"    xori {rd}, {rd}, 1")
-    
+
     def emit_cmp_gt(self, a1: str, a2: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rb = self._ensure_in_reg(a2)
+        if self._is_literal(a1) and self._is_literal(a2):
+            self.emit(f"    li $t8, {a1}")
+            ra = "$t8"
+            self.emit(f"    li $t9, {a2}")
+            rb = "$t9"
+        else:
+            ra = self._ensure_in_reg(a1)
+            rb = self._ensure_in_reg(a2)
+        
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    slt {rd}, {rb}, {ra}")
-    
+
     def emit_cmp_ge(self, a1: str, a2: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rb = self._ensure_in_reg(a2)
+        if self._is_literal(a1) and self._is_literal(a2):
+            self.emit(f"    li $t8, {a1}")
+            ra = "$t8"
+            self.emit(f"    li $t9, {a2}")
+            rb = "$t9"
+        else:
+            ra = self._ensure_in_reg(a1)
+            rb = self._ensure_in_reg(a2)
+        
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    slt {rd}, {ra}, {rb}")
         self.emit(f"    xori {rd}, {rd}, 1")
+    
+    # ========== CONTROL DE FLUJO ==========
     
     def emit_label(self, label: str):
         self.emit(f"{label}:")
@@ -395,6 +485,8 @@ class InstructionEmitter:
         rc = self._ensure_in_reg(cond)
         self.emit(f"    bne {rc}, {REG_ZERO}, {label}")
     
+    # ========== MOVIMIENTOS ==========
+    
     def emit_mov(self, source: str, dest: str):
         if self._is_literal(source):
             rd = self.reg_alloc.get_reg(dest, for_write=True)
@@ -408,14 +500,59 @@ class InstructionEmitter:
             rd = self.reg_alloc.get_reg(dest, for_write=True)
             self.emit(f"    move {rd}, {rs}")
     
+    # ========== I/O ==========
+    
     def emit_print(self, operand: str):
-        ra = self._ensure_in_reg(operand)
-        self.emit(f"    move $a0, {ra}")
-        self.emit(f"    li $v0, 1")
+        if self._is_string_literal(operand):
+            label = self.data_section.add_string(operand)
+            self.emit(f"    la $a0, {label}")
+            self.emit(f"    li $v0, 4")  
+            self.emit(f"    syscall")
+        else:
+            ra = self._ensure_in_reg(operand)
+            self.emit(f"    move $a0, {ra}")
+            self.emit(f"    li $v0, 1")  
+            self.emit(f"    syscall")
+            self.emit(f"    li $a0, 10")
+            self.emit(f"    li $v0, 11")
+            self.emit(f"    syscall")
+    
+    # ========== OBJETOS (OOP) ==========
+    
+    def emit_new(self, class_name: str, result: str):
+        rd = self.reg_alloc.get_reg(result, for_write=True)
+        
+        self.emit(f"    # NEW {class_name}")
+        self.emit(f"    li $a0, 100") 
+        self.emit(f"    li $v0, 9")     
         self.emit(f"    syscall")
-        self.emit(f"    li $a0, 10")
-        self.emit(f"    li $v0, 11")
-        self.emit(f"    syscall")
+        self.emit(f"    move {rd}, $v0")  
+        
+        self.emit(f"    # Initialize fields to 0")
+        for i in range(0, 100, 4):
+            self.emit(f"    sw $zero, {i}({rd})")
+    
+    def emit_getp(self, obj: str, field: str, result: str):
+        robj = self._ensure_in_reg(obj)
+        rd = self.reg_alloc.get_reg(result, for_write=True)
+        
+        # Obtener offset del campo
+        offset = FIELD_OFFSETS.get(field, 0)
+        
+        self.emit(f"    # GETP {obj}.{field} -> {result}")
+        self.emit(f"    lw {rd}, {offset}({robj})")
+    
+    def emit_setp(self, value: str, obj: str, field: str):
+        rval = self._ensure_in_reg(value)
+        robj = self._ensure_in_reg(obj)
+        
+        # Obtener offset del campo
+        offset = FIELD_OFFSETS.get(field, 0)
+        
+        self.emit(f"    # SETP {obj}.{field} = {value}")
+        self.emit(f"    sw {rval}, {offset}({robj})")
+    
+    # ========== FUNCIONES ==========
     
     def emit_enter(self, frame_size: int):
         self.emit(f"    addi $sp, $sp, -4")
@@ -456,25 +593,36 @@ class InstructionEmitter:
     def emit_call(self, func_label: str, result: Optional[str] = None):
         reg_params = self.pending_params[:4]
         stack_params = self.pending_params[4:]
+        
+        # Stack params en orden inverso
         for param in reversed(stack_params):
             rp = self._ensure_in_reg(param)
             self.emit(f"    addi $sp, $sp, -4")
             self.emit(f"    sw {rp}, 0($sp)")
+        
+        # Register params
         for i, param in enumerate(reg_params):
             rp = self._ensure_in_reg(param)
             self.emit(f"    move $a{i}, {rp}")
+        
+        # Call
         self.emit(f"    jal {func_label}")
+        
+        # Cleanup stack
         if stack_params:
             cleanup_bytes = len(stack_params) * 4
             self.emit(f"    addi $sp, $sp, {cleanup_bytes}")
+        
+        # Capturar resultado
         if result:
             rd = self.reg_alloc.get_reg(result, for_write=True)
             self.emit(f"    move {rd}, $v0")
+        
         self.pending_params.clear()
         self.reg_alloc.descriptor.clear_all_temps()
 
 
-# MIPS CODE GENERATOR 
+# ==================== MIPS CODE GENERATOR ====================
 
 class MIPSCodeGen:
     def __init__(self):
@@ -509,14 +657,13 @@ class MIPSCodeGen:
                     self.frame_manager.allocate_local(var_name)
     
     def _generate_code(self, tac_program: TACProgram):
-        # Emitir encabezado
+        # Encabezado
         self.output.append(".text")
         self.output.append(".globl main")
         self.output.append("main:")
         
-        # Detectar si hay program_start
+        # Saltar a program_start
         has_program_start = any(ins.op == "LABEL" and ins.res == "program_start" for ins in tac_program.code)
-        
         if has_program_start:
             self.output.append("    j program_start")
         
@@ -532,26 +679,6 @@ class MIPSCodeGen:
         # Volcar output final
         if self.emitter:
             self.output.extend(self.emitter.get_output())
-    
-    # def _emit_main_prologue(self, tac_program: TACProgram):
-    #     self.output.append(".text")
-    #     self.output.append(".globl main")
-    #     self.output.append("main:")
-        
-    #     # Detectar si hay program_start
-    #     has_program_start = any(ins.op == "LABEL" and ins.res == "program_start" for ins in tac_program.code)
-        
-    #     if has_program_start:
-    #         # Saltar al código principal, dejando las funciones que se definen antes
-    #         self.output.append("    j program_start")
-    #     else:
-    #         # Si no hay program_start, buscar func_main
-    #         has_func_main = any(ins.op == "LABEL" and ins.res == "func_main" for ins in tac_program.code)
-    #         if has_func_main:
-    #             self.output.append("    jal func_main")
-    
-    # def _emit_main_epilogue(self):
-    #     pass
     
     def _translate_instruction(self, ins: TACInstr):
         op = ins.op
@@ -569,18 +696,21 @@ class MIPSCodeGen:
             
             self.emitter.emit_label(label)
             
+            # Exit en program_end
             if label == "program_end":
                 self.emitter.emit("")
                 self.emitter.emit("# Exit program")
                 self.emitter.emit("    li $v0, 10")
                 self.emitter.emit("    syscall")
+        
         elif op == "JUMP":
-            label = res if res else a1  
+            label = a1 if a1 else res
             self.emitter.emit_jump(label)
         elif op == "IFZ":
             self.emitter.emit_ifz(a1, res)
         elif op == "IFNZ":
             self.emitter.emit_ifnz(a1, res)
+        
         elif op == "ADD":
             self.emitter.emit_add(a1, a2, res)
         elif op == "SUB":
@@ -595,6 +725,7 @@ class MIPSCodeGen:
             self.emitter.emit_neg(a1, res)
         elif op == "NOT":
             self.emitter.emit_not(a1, res)
+        
         elif op == "CMP==":
             self.emitter.emit_cmp_eq(a1, a2, res)
         elif op == "CMP!=":
@@ -607,10 +738,12 @@ class MIPSCodeGen:
             self.emitter.emit_cmp_gt(a1, a2, res)
         elif op == "CMP>=":
             self.emitter.emit_cmp_ge(a1, a2, res)
+        
         elif op == "MOV":
             self.emitter.emit_mov(a1, res)
         elif op == "PRINT":
             self.emitter.emit_print(a1)
+        
         elif op == "ENTER":
             frame_size = int(a1) if a1 and a1.isdigit() else 0
             self.emitter.emit_enter(frame_size)
@@ -623,6 +756,15 @@ class MIPSCodeGen:
             self.emitter.emit_param(a1)
         elif op == "CALL":
             self.emitter.emit_call(a1, res)
+        
+        # ========== OOP OPERATIONS ==========
+        elif op == "NEW":
+            self.emitter.emit_new(a1, res)
+        elif op == "GETP":
+            self.emitter.emit_getp(a1, a2, res)
+        elif op == "MOVP":
+            self.emitter.emit_setp(a1, a2, res)
+        
         else:
             self.emitter.emit(f"    # Unsupported: {op}")
     
@@ -651,6 +793,5 @@ class MIPSCodeGen:
 # ==================== API PÚBLICA ====================
 
 def generate_mips_from_tac(tac_program: TACProgram) -> str:
-    """Genera código MIPS desde TAC"""
     codegen = MIPSCodeGen()
     return codegen.generate(tac_program)
