@@ -399,7 +399,7 @@ class InstructionEmitter:
         
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    xor {rd}, {ra}, {rb}")
-        self.emit(f"    sltu {rd}, {rd}, 1")
+        self.emit(f"    sltiu {rd}, {rd}, 1")
 
     def emit_cmp_ne(self, a1: str, a2: str, result: str):
         if self._is_literal(a1) and self._is_literal(a2):
@@ -413,7 +413,7 @@ class InstructionEmitter:
         
         rd = self.reg_alloc.get_reg(result, for_write=True)
         self.emit(f"    xor {rd}, {ra}, {rb}")
-        self.emit(f"    sltu {rd}, {REG_ZERO}, {rd}")
+        self.emit(f"    sltiu {rd}, {REG_ZERO}, {rd}")
 
     def emit_cmp_lt(self, a1: str, a2: str, result: str):
         if self._is_literal(a1) and self._is_literal(a2):
@@ -661,24 +661,46 @@ class MIPSCodeGen:
         self.output.append(".text")
         self.output.append(".globl main")
         self.output.append("main:")
-        
-        # Saltar a program_start
-        has_program_start = any(ins.op == "LABEL" and ins.res == "program_start" for ins in tac_program.code)
-        if has_program_start:
-            self.output.append("    j program_start")
-        
-        # Crear emitter global
+        # Siempre saltar al código principal
+        self.output.append("    j program_start")
+
+        # 1) Localiza la primera aparición de program_start en el IR (si existe)
+        ps_idx = -1
+        for i, ins in enumerate(tac_program.code):
+            if ins.op == "LABEL" and str(ins.res) == "program_start":
+                ps_idx = i
+                break
+
+        # Crear emitter global temporal (para buffering controlado)
         self.frame_manager.enter_function("__global__")
         self.reg_alloc = RegisterAllocator(self.frame_manager)
         self.emitter = InstructionEmitter(self.reg_alloc, self.frame_manager, self.data_section)
-        
-        # Generar instrucciones
-        for ins in tac_program.code:
-            self._translate_instruction(ins)
-        
-        # Volcar output final
+
+        # 2) Si existe 'program_start' en el IR, generamos en dos fases:
+        #    A) TODO lo que está antes de program_start (funciones, helpers, etc.)
+        #    B) Emite explícitamente el label 'program_start:' y luego el resto
+        if ps_idx != -1:
+            # Fase A: antes de program_start (excluyendo el propio label)
+            for i in range(ps_idx):
+                self._translate_instruction(tac_program.code[i])
+
+            # Forzamos colocar el label 'program_start:' aquí (después de las funciones)
+            self.emitter.emit_label("program_start")
+
+            # Fase B: después de program_start (saltando ese label original)
+            for i in range(ps_idx + 1, len(tac_program.code)):
+                self._translate_instruction(tac_program.code[i])
+
+        else:
+            # Si el IR no trae program_start, simplemente traducimos todo
+            for ins in tac_program.code:
+                self._translate_instruction(ins)
+
+        # Volcar output final del emitter
         if self.emitter:
             self.output.extend(self.emitter.get_output())
+
+
     
     def _translate_instruction(self, ins: TACInstr):
         op = ins.op
