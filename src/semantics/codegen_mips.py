@@ -25,8 +25,8 @@ FIELD_OFFSETS = {
 
 class DataSection:
     def __init__(self):
-        self.str_to_label: Dict[str, str] = {}
-        self.counter = 0
+        self.str_to_label: Dict[str, str] = {"": "str_0"}
+        self.counter = 1
 
     def add_string(self, literal: str) -> str:
         """
@@ -65,13 +65,6 @@ class DataSection:
 # ============================================================
 
 class SimpleRegisterAllocator:
-    """
-    Asigna variables a registros sin spills a memoria.
-    - Variables 'param0..3', 'this', 'nombre', 'edad', 'grado' se leen de $a0-$a3.
-    - El resto se va a $t0-$t7 primero y luego $s0-$s7.
-    - Cuando no hay registros libres, se recicla alguno (y se pierde el valor viejo).
-      Para el programa actual es suficiente.
-    """
     def __init__(self):
         self.var_to_reg: Dict[str, str] = {}
         self.reg_to_var: Dict[str, Optional[str]] = {}
@@ -95,10 +88,6 @@ class SimpleRegisterAllocator:
     # -------- API principal --------
 
     def get_reg_for_var(self, var: str, for_write: bool = False) -> str:
-        """
-        Obtiene un registro para una variable "normal" (no literal, no string).
-        Sin spills a memoria.
-        """
         # Si ya tiene registro, se reutiliza
         if var in self.var_to_reg:
             return self.var_to_reg[var]
@@ -117,7 +106,6 @@ class SimpleRegisterAllocator:
                 self.var_to_reg[var] = r
                 return r
 
-        # Si no hay libres, recicla el primero de $t0-$t7
         victim = TEMP_REGS[0]
         old_var = self.reg_to_var[victim]
         if old_var is not None and old_var in self.var_to_reg:
@@ -128,12 +116,20 @@ class SimpleRegisterAllocator:
 
     def ensure_in_reg(self, operand: str, emitter, data_section: DataSection) -> str:
 
-
         if operand is None:
             emitter.emit("    # WARNING: ensure_in_reg llamado con None, usando $zero")
             return "$zero"
+
         if operand == "this":
-            return "$a0"
+            return "$s7"
+
+
+        if operand == "nombre":
+            return "$t0"
+        if operand == "edad":
+            return "$t1"
+        if operand == "grado":
+            return "$t2"
 
         # literales numéricos
         if self._is_literal(operand):
@@ -146,23 +142,27 @@ class SimpleRegisterAllocator:
             emitter.emit(f"    la $at, {lbl}")
             return "$at"
 
-        # CASO ESPECIAL: variable global 'log' 
         if operand == "log":
-            emitter.emit("    la $at, str_0")  # o log_buffer si estás usando buffer
+            emitter.emit("    la $at, str_0")  
             return "$at"
 
-        # parámetros "param0..3" (solo si en tu TAC existen así)
         if operand.startswith("param"):
             try:
                 idx = int(operand.replace("param", ""))
-                if 0 <= idx <= 3:
+                if idx == 0:
+                    return "$t0"
+                elif idx == 1:
+                    return "$t1"
+                elif idx == 2:
+                    return "$t2"
+                else:
                     return f"$a{idx}"
             except ValueError:
-            # si falla, cae a variable normal
                 pass
 
-
+        # variable normal: asignar registro con el allocator
         return self.get_reg_for_var(operand, for_write=False)
+
 
 
 
@@ -408,36 +408,67 @@ class InstructionEmitter:
             self.emit(f"    sw $zero, {off}({rd})")
 
     def emit_getp(self, obj: str, field: str, res: str):
-        base = self._ensure(obj)
+        # CORRECCIÓN: Si obj es "this", usar $s7 (donde guardamos this)
+        if obj == "this":
+            base = "$s7"
+        else:
+            base = self._ensure(obj)
+
         rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
         off = FIELD_OFFSETS.get(field, 0)
         self.emit(f"    # GETP {obj}.{field} -> {res}")
         self.emit(f"    lw {rd}, {off}({base})")
 
+        # Marcar como string si el campo es nombre o color
+        if off == 0 or off == 8:
+            self.string_vars.add(res)
+
     def emit_setp(self, value: str, obj: str, field: str):
         rv = self._ensure(value)
-        base = self._ensure(obj)
+
+        # CORRECCIÓN: Si obj es "this", usar $s7
+        if obj == "this":
+            base = "$s7"
+        else:
+            base = self._ensure(obj)
+
         off = FIELD_OFFSETS.get(field, 0)
         self.emit(f"    # SETP {obj}.{field} = {value}")
         self.emit(f"    sw {rv}, {off}({base})")
-
-    # -------- FUNCIONES / LLAMADAS --------
+        # -------- FUNCIONES / LLAMADAS --------
 
     def emit_enter(self, frame_size: int):
         """
-        Prólogo muy simple: guarda $ra y $fp; NO usa locals ni offsets.
-        Recuerda: no estamos usando stack para variables, solo registros.
+        Prólogo: guarda $ra, $fp y parámetros $a0-$a3
         """
-        self.emit(f"    addi $sp, $sp, -8")
-        self.emit(f"    sw $ra, 4($sp)")
-        self.emit(f"    sw $fp, 0($sp)")
+        self.emit(f"    addi $sp, $sp, -24")
+        self.emit(f"    sw $ra, 20($sp)")
+        self.emit(f"    sw $fp, 16($sp)")
+        self.emit(f"    sw $a0, 12($sp)")
+        self.emit(f"    sw $a1, 8($sp)")
+        self.emit(f"    sw $a2, 4($sp)")
+        self.emit(f"    sw $a3, 0($sp)")
         self.emit(f"    move $fp, $sp")
+
+        # CORRECCIÓN CRÍTICA: Guardar $a0 antes de mover parámetros
+        # porque en constructores y métodos, $a0 es 'this' y lo necesitamos
+        self.emit(f"    # Guardar this en $s7 (registro saved)")
+        self.emit(f"    move $s7, $a0")
+
+        # Mover parámetros a registros temporales que tu TAC espera
+        self.emit(f"    move $t0, $a1")  # primer parámetro (después de this)
+        self.emit(f"    move $t1, $a2")  # segundo parámetro
+        self.emit(f"    move $t2, $a3")  # tercer parámetro
 
     def emit_leave(self):
         self.emit(f"    move $sp, $fp")
-        self.emit(f"    lw $fp, 0($sp)")
-        self.emit(f"    lw $ra, 4($sp)")
-        self.emit(f"    addi $sp, $sp, 8")
+        self.emit(f"    lw $a3, 0($sp)")
+        self.emit(f"    lw $a2, 4($sp)")
+        self.emit(f"    lw $a1, 8($sp)")
+        self.emit(f"    lw $a0, 12($sp)")
+        self.emit(f"    lw $fp, 16($sp)")
+        self.emit(f"    lw $ra, 20($sp)")
+        self.emit(f"    addi $sp, $sp, 24")
 
     def emit_ret(self, retval: Optional[str]):
         if retval is not None:
@@ -451,53 +482,43 @@ class InstructionEmitter:
 
     def emit_call(self, func_label: str, res: Optional[str]):
         """
-        Llamada de función:
-        - CASOS ESPECIALES: helpers nativos
-        - CASO GENERAL: jal func_label
+        Llamada de función con manejo especial de constructores
         """
-
-        # Nombre base sin el prefijo "func_"
         base_name = func_label
         if base_name.startswith("func_"):
             base_name = base_name[5:]
 
-        # ======================
-        # CASOS ESPECIALES
-        # ======================
-
-        # --- printString(x: string): string ---
+        # === printString ===
         if base_name == "printString":
             arg = self.pending_params[0] if self.pending_params else None
             if arg is not None:
-                r = self._ensure(arg)          # r tiene la dirección del string
+                r = self._ensure(arg)
                 self.emit(f"    move $a0, {r}")
-                self.emit("    li $v0, 4")     # print string
+                self.emit("    li $v0, 4")
                 self.emit("    syscall")
-                # Semántica del lenguaje: retorna el mismo string
                 if res is not None:
                     rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
                     self.emit(f"    move {rd}, $a0")
+                    self.string_vars.add(res)
             self.pending_params.clear()
             return
 
-        # --- printInteger(x: integer): integer ---
+        # === printInteger ===
         if base_name == "printInteger":
             arg = self.pending_params[0] if self.pending_params else None
             if arg is not None:
-                r = self._ensure(arg)          # r tiene el entero
+                r = self._ensure(arg)
                 self.emit(f"    move $a0, {r}")
-                self.emit("    li $v0, 1")     # print int
+                self.emit("    li $v0, 1")
                 self.emit("    syscall")
-                # Retorna el mismo entero
                 if res is not None:
                     rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
                     self.emit(f"    move {rd}, $a0")
             self.pending_params.clear()
             return
 
-        # --- toString(x: integer): string (stub) ---
+        # === toString ===
         if base_name == "toString":
-            # Ignoramos los parámetros, devolvemos puntero a "" (str_0)
             if res is not None:
                 rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
                 self.emit("    la $at, str_0")
@@ -506,31 +527,21 @@ class InstructionEmitter:
             self.pending_params.clear()
             return
 
-        # --- MÉTODOS ESPECIALES DEL OBJETO: saludar / estudiar / incrementarEdad ---
-        if base_name in ("saludar", "estudiar", "incrementarEdad"):
-            reg_params = self.pending_params[:4]
-            for i, op in enumerate(reg_params):
-                if op is not None:
-                    r = self._ensure(op)
-                    self.emit(f"    move $a{i}, {r}")
+        # === CASO GENERAL ===
 
-            self.emit(f"    jal {func_label}")
+        # CORRECCIÓN CRÍTICA: Para constructores, guardar $a0 antes de la llamada
+        is_constructor = "_constructor" in base_name
+        saved_this_reg = None
 
-            # Estas funciones imprimen internamente y conceptualmente
-            # devuelven un string (podemos modelarlo como la cadena vacía).
-            if res is not None:
-                rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
-                # Usamos una cadena vacía como valor de retorno "seguro"
-                self.emit("    la $at, str_0")
-                self.emit(f"    move {rd}, $at")
-                self.string_vars.add(res)
+        if is_constructor and self.pending_params:
+            # El primer parámetro es 'this' (el objeto)
+            # Guardarlo temporalmente antes de configurar parámetros
+            this_param = self.pending_params[0]
+            saved_this_reg = self._ensure(this_param)
+            # Guardar en un registro temporal que no se sobreescribirá
+            self.emit(f"    move $s7, {saved_this_reg}")
 
-            self.pending_params.clear()
-            return
-
-        # ======================
-        # CASO GENERAL (resto de funciones)
-        # ======================
+        # Pasar parámetros a $a0-$a3
         reg_params = self.pending_params[:4]
         for i, op in enumerate(reg_params):
             if op is not None:
@@ -539,12 +550,23 @@ class InstructionEmitter:
 
         self.emit(f"    jal {func_label}")
 
+        # Manejar valor de retorno
         if res is not None:
             rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
-            self.emit(f"    move {rd}, $v0")
+
+            if is_constructor:
+                # Los constructores "retornan" el objeto (this)
+                # que guardamos en $s7
+                self.emit(f"    move {rd}, $s7")
+            else:
+                # Funciones normales retornan en $v0
+                self.emit(f"    move {rd}, $v0")
+
+                # Marcar como string si es necesario
+                if base_name in ("saludar", "estudiar", "incrementarEdad"):
+                    self.string_vars.add(res)
 
         self.pending_params.clear()
-
 
 
 # ============================================================

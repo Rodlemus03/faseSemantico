@@ -174,6 +174,8 @@ class CodeGen(ParseTreeVisitor):
     def visitFunctionDeclaration(self, ctx):
         name = ctx.Identifier().getText()
         self.current_function = name
+        # Reiniciar índice de retorno para esta función
+        self.func_ret_idx = None
 
         func_sym: Optional[FunctionSymbol] = None
         if self.resolver:
@@ -188,11 +190,15 @@ class CodeGen(ParseTreeVisitor):
         else:
             entry_lbl = f"func_{name}"
             exit_lbl = f"{name}_exit"
+
         if func_sym:
             func_sym.entry_label = entry_lbl
             func_sym.exit_label = exit_lbl
 
         self.prog.label(entry_lbl)
+
+        if self.current_class is not None:
+            self.prog.emit("METHOD_BEGIN", self.current_class, None, entry_lbl)
 
         fl = self.layouts.frame(name)
 
@@ -213,27 +219,26 @@ class CodeGen(ParseTreeVisitor):
         enter_idx = len(self.prog.code)
         self.prog.emit("ENTER", 0)
 
-        self.func_ret_idx = None
+        # --- Cuerpo de la función ---
+        if ctx.block():
+            self.visit(ctx.block())
 
-        self.visit(ctx.block())
-
-        fl.finalize()
-        if func_sym:
-            func_sym.frame_size = fl.frame_size
-        self.prog.code[enter_idx].a1 = str(fl.frame_size)
-
+        # --- Label de salida y RET ---
         self.prog.label(exit_lbl)
-        self.prog.emit("LEAVE")
 
         if self.func_ret_idx is not None:
-            self.prog.emit("RET", f"t{self.func_ret_idx}")
-            self.temps.release(self.func_ret_idx)
+            # Hubo 'return expr;' al menos una vez: devolver ese temporal
+            ret_name = self._temp_name(self.func_ret_idx)
+            self.prog.emit("RET", ret_name)
         else:
-            self.prog.emit("RET")
+            # Función sin valor de retorno explícito
+            self.prog.emit("RET", None)
 
+        # Limpiar estado
         self.current_function = None
         self.func_ret_idx = None
         return None
+
 
     def visitReturnStatement(self, ctx):
         if hasattr(ctx, "expression") and ctx.expression():
@@ -568,7 +573,19 @@ class CodeGen(ParseTreeVisitor):
                 ctx.getChild(0).getText() == '[')
 
     def visitIdentifierExpr(self, ctx):
-        return ctx.Identifier().getText()
+        name = ctx.Identifier().getText()
+
+        if self.current_function and self.resolver:
+            try:
+                sym = self.resolver.resolve(name)
+            except Exception:
+                sym = None
+
+            if isinstance(sym, VarSymbol) and getattr(sym, "is_param", False):
+                return f"param{sym.param_index}"
+
+        return name
+
 
     def visitNewExpr(self, ctx):
         class_name = ctx.Identifier().getText()
@@ -586,9 +603,17 @@ class CodeGen(ParseTreeVisitor):
             self.prog.emit("PARAM", self._as_operand(arg))
             self._release_if_temp(arg)
 
-        constructor_label = f"func_{class_name}_constructor"  
-        self.prog.emit("CALL", constructor_label, None, None)
-        return obj_idx
+        constructor_label = f"func_{class_name}_constructor"
+        
+        # CORRECCIÓN: Guardar el resultado de la llamada al constructor
+        # El constructor debe retornar el objeto (this)
+        result_idx = self.temps.get()
+        result_temp = self._temp_name(result_idx)
+        self.prog.emit("CALL", constructor_label, None, result_temp)
+        
+        # Liberar el temporal original y retornar el resultado
+        self.temps.release(obj_idx)
+        return result_idx
 
     def visitThisExpr(self, ctx):
         return "this"
