@@ -42,12 +42,40 @@ class CodeGen(ParseTreeVisitor):
         return self.prog
 
     def visitProgram(self, ctx):
+        # Obtener todos los statements del programa
+        statements = getattr(ctx, "statement", lambda: [])()
+    
+        decl_stmts = []   # funciones y clases
+        other_stmts = []  # "main" (let, const, asignaciones, if, while, etc.)
+    
+        for st in statements:
+            # StatementContext típicamente tiene estos métodos si contiene algo:
+            fd = getattr(st, "functionDeclaration", None)
+            cd = getattr(st, "classDeclaration", None)
+    
+            is_func = callable(fd) and fd() is not None
+            is_class = callable(cd) and cd() is not None
+    
+            if is_func or is_class:
+                decl_stmts.append(st)
+            else:
+                other_stmts.append(st)
+    
+        # 1) Código del programa principal
         self.prog.label("program_start")
-        for st in getattr(ctx, "statement", lambda: [])():
+        for st in other_stmts:
             self.visit(st)
         self.prog.label("program_end")
+    
+        # 2) Declaraciones de funciones y clases (después del main)
+        for st in decl_stmts:
+            self.visit(st)
+    
         return None
 
+
+   
+   
     def visitExpressionStatement(self, ctx):
         self._gen_expr(ctx.expression())
         return None

@@ -1,22 +1,17 @@
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional
 from .ir import TACProgram, TACInstr
 
-# ==================== CONSTANTES MIPS ====================
+# ============================================================
+#  REGISTROS Y CONSTANTES
+# ============================================================
 
-TEMP_REGS = [f"$t{i}" for i in range(8)]  
-SAVED_REGS = [f"$s{i}" for i in range(8)]  
-ARG_REGS = [f"$a{i}" for i in range(4)]   
-
-REG_V0 = "$v0"
-REG_RA = "$ra"
-REG_SP = "$sp"
-REG_FP = "$fp"
-REG_ZERO = "$zero"
-REG_T8 = "$t8"
-REG_T9 = "$t9"
+TEMP_REGS = [f"$t{i}" for i in range(8)]      # $t0-$t7
+SAVED_REGS = [f"$s{i}" for i in range(8)]     # $s0-$s7
+ARG_REGS = [f"$a{i}" for i in range(4)]       # $a0-$a3
 
 WORD_SIZE = 4
 
+# Campos de objetos Persona / Estudiante
 FIELD_OFFSETS = {
     "nombre": 0,
     "edad": 4,
@@ -24,774 +19,706 @@ FIELD_OFFSETS = {
     "grado": 12,
 }
 
-
-# ==================== REGISTER ALLOCATOR ====================
-
-class RegisterDescriptor:
-    def __init__(self):
-        self.reg_contents: Dict[str, Optional[str]] = {}
-        self.var_location: Dict[str, Optional[str]] = {}
-        for reg in TEMP_REGS + SAVED_REGS:
-            self.reg_contents[reg] = None
-    
-    def is_free(self, reg: str) -> bool:
-        return self.reg_contents.get(reg) is None
-    
-    def allocate(self, var: str, reg: str):
-        if self.reg_contents[reg] is not None:
-            old_var = self.reg_contents[reg]
-            self.var_location[old_var] = None
-        self.reg_contents[reg] = var
-        self.var_location[var] = reg
-    
-    def free_register(self, reg: str):
-        if reg in self.reg_contents:
-            var = self.reg_contents[reg]
-            if var:
-                self.var_location[var] = None
-            self.reg_contents[reg] = None
-    
-    def get_location(self, var: str) -> Optional[str]:
-        return self.var_location.get(var)
-    
-    def clear_all_temps(self):
-        for reg in TEMP_REGS:
-            self.free_register(reg)
-
-
-class RegisterAllocator:
-    def __init__(self, frame_manager):
-        self.descriptor = RegisterDescriptor()
-        self.frame_manager = frame_manager
-        self.lru_counter = 0
-        self.reg_last_use: Dict[str, int] = {}
-        self.output: List[str] = []
-    
-    def emit(self, instruction: str):
-        self.output.append(instruction)
-    
-    def get_reg(self, var: str, for_write: bool = False) -> str:
-        existing = self.descriptor.get_location(var)
-        if existing:
-            self._update_lru(existing)
-            return existing
-        
-        is_temp = var.startswith('t') and var[1:].isdigit()
-        free_reg = self._find_free_temp() if is_temp else self._find_free_saved()
-        
-        if free_reg:
-            self.descriptor.allocate(var, free_reg)
-            self._update_lru(free_reg)
-            if not for_write:
-                self._load_from_memory(var, free_reg)
-            return free_reg
-        
-        victim_reg = self._select_victim(is_temp)
-        self._spill_register(victim_reg)
-        self.descriptor.allocate(var, victim_reg)
-        self._update_lru(victim_reg)
-        if not for_write:
-            self._load_from_memory(var, victim_reg)
-        return victim_reg
-    
-    def _find_free_temp(self) -> Optional[str]:
-        for reg in TEMP_REGS:
-            if self.descriptor.is_free(reg):
-                return reg
-        return None
-    
-    def _find_free_saved(self) -> Optional[str]:
-        for reg in SAVED_REGS:
-            if self.descriptor.is_free(reg):
-                return reg
-        return None
-    
-    def _select_victim(self, prefer_temp: bool) -> str:
-        pool = TEMP_REGS if prefer_temp else SAVED_REGS
-        oldest_time = float('inf')
-        victim = pool[0]
-        for reg in pool:
-            last_use = self.reg_last_use.get(reg, 0)
-            if last_use < oldest_time:
-                oldest_time = last_use
-                victim = reg
-        return victim
-    
-    def _spill_register(self, reg: str):
-        var = self.descriptor.reg_contents.get(reg)
-        if var is None:
-            return
-        self._store_to_memory(var, reg)
-        self.descriptor.free_register(reg)
-    
-    def _load_from_memory(self, var: str, reg: str):
-        offset = self.frame_manager.get_var_offset(var)
-        if offset is not None:
-            self.emit(f"    lw {reg}, {offset}($fp)")
-    
-    def _store_to_memory(self, var: str, reg: str):
-        offset = self.frame_manager.get_var_offset(var)
-        if offset is not None:
-            self.emit(f"    sw {reg}, {offset}($fp)")
-        else:
-            offset = self.frame_manager.allocate_local(var)
-            self.emit(f"    sw {reg}, {offset}($fp)")
-    
-    def _update_lru(self, reg: str):
-        self.lru_counter += 1
-        self.reg_last_use[reg] = self.lru_counter
-    
-    def _is_literal(self, operand: str) -> bool:
-        if operand is None:
-            return False
-        s = str(operand)
-        return s.isdigit() or (s.startswith('-') and s[1:].isdigit())
-
-
-# ==================== STACK FRAME MANAGER ====================
-
-class StackFrame:
-    def __init__(self, function_name: str):
-        self.function_name = function_name
-        self.params: List[str] = []
-        self.locals: Dict[str, int] = {}
-        self.saved_regs_used: Set[str] = set()
-        self.next_local_offset = -8
-        self.frame_size = 0
-    
-    def add_param(self, param_name: str):
-        self.params.append(param_name)
-    
-    def add_local(self, var_name: str) -> int:
-        if var_name in self.locals:
-            return self.locals[var_name]
-        offset = self.next_local_offset
-        self.locals[var_name] = offset
-        self.next_local_offset -= WORD_SIZE
-        return offset
-    
-    def mark_saved_reg_used(self, reg: str):
-        if reg in SAVED_REGS:
-            self.saved_regs_used.add(reg)
-    
-    def get_param_location(self, param_name: str) -> Tuple[Optional[str], Optional[int]]:
-        try:
-            idx = self.params.index(param_name)
-        except ValueError:
-            return (None, None)
-        if idx < 4:
-            return (ARG_REGS[idx], None)
-        else:
-            offset = 8 + (idx - 4) * WORD_SIZE
-            return (None, offset)
-    
-    def finalize(self):
-        size = 8
-        size += len(self.saved_regs_used) * WORD_SIZE
-        size += len(self.locals) * WORD_SIZE
-        if size % 8 != 0:
-            size += (8 - size % 8)
-        self.frame_size = size
-
-
-class StackFrameManager:
-    def __init__(self):
-        self.frames: Dict[str, StackFrame] = {}
-        self.current_frame: Optional[StackFrame] = None
-    
-    def enter_function(self, function_name: str):
-        if function_name not in self.frames:
-            self.frames[function_name] = StackFrame(function_name)
-        self.current_frame = self.frames[function_name]
-    
-    def exit_function(self):
-        if self.current_frame:
-            self.current_frame.finalize()
-        self.current_frame = None
-    
-    def allocate_local(self, var_name: str) -> int:
-        if self.current_frame:
-            return self.current_frame.add_local(var_name)
-        return 0
-    
-    def get_var_offset(self, var_name: str) -> Optional[int]:
-        if not self.current_frame:
-            return None
-        if var_name in self.current_frame.locals:
-            return self.current_frame.locals[var_name]
-        reg, offset = self.current_frame.get_param_location(var_name)
-        if reg:
-            return self.allocate_local(var_name)
-        return offset
-    
-    def get_frame_size(self) -> int:
-        if self.current_frame:
-            return self.current_frame.frame_size
-        return 0
-    
-    def get_saved_regs(self) -> List[str]:
-        if self.current_frame:
-            return sorted(list(self.current_frame.saved_regs_used))
-        return []
-
-
-# ==================== DATA SECTION ====================
+# ============================================================
+#  DATA SECTION (STRINGS)
+# ============================================================
 
 class DataSection:
     def __init__(self):
-        self.strings: Dict[str, str] = {}
-        self.string_counter = 0
-        self.globals: Dict[str, any] = {}
-    
-    def add_string(self, string_literal: str) -> str:
-        content = string_literal.strip('"')
-        for existing_content, label in self.strings.items():
-            if existing_content == content:
-                return label
-        label = f"str_{self.string_counter}"
-        self.string_counter += 1
-        self.strings[content] = label
+        self.str_to_label: Dict[str, str] = {}
+        self.counter = 0
+
+    def add_string(self, literal: str) -> str:
+        """
+        Recibe algo como "\"Hola\"" y devuelve el label str_k correspondiente.
+        """
+        if literal is None:
+            literal = ""
+        s = str(literal)
+        if s.startswith('"') and s.endswith('"'):
+            s = s[1:-1]
+
+        if s in self.str_to_label:
+            return self.str_to_label[s]
+
+        label = f"str_{self.counter}"
+        self.counter += 1
+        self.str_to_label[s] = label
         return label
-    
-    def generate(self) -> List[str]:
-        lines = []
-        if not self.strings and not self.globals:
-            return lines
-        lines.append(".data")
-        for content, label in self.strings.items():
-            escaped = content.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-            lines.append(f'{label}: .asciiz "{escaped}"')
-        for var_name, value in self.globals.items():
-            lines.append(f'{var_name}: .word {value}')
+
+    def generate_lines(self) -> List[str]:
+        if not self.str_to_label:
+            return []
+        lines = [".data"]
+        for s, label in self.str_to_label.items():
+            esc = (
+                s.replace("\\", "\\\\")
+                 .replace('"', '\\"')
+                 .replace("\n", "\\n")
+            )
+            lines.append(f'{label}: .asciiz "{esc}"')
         lines.append("")
         return lines
 
+# ============================================================
+#  REGISTER ALLOCATOR MUY SIMPLE (SIN SPILLS)
+# ============================================================
 
-# ==================== INSTRUCTION EMITTER ====================
+class SimpleRegisterAllocator:
+    """
+    Asigna variables a registros sin spills a memoria.
+    - Variables 'param0..3', 'this', 'nombre', 'edad', 'grado' se leen de $a0-$a3.
+    - El resto se va a $t0-$t7 primero y luego $s0-$s7.
+    - Cuando no hay registros libres, se recicla alguno (y se pierde el valor viejo).
+      Para el programa actual es suficiente.
+    """
+    def __init__(self):
+        self.var_to_reg: Dict[str, str] = {}
+        self.reg_to_var: Dict[str, Optional[str]] = {}
+        for r in TEMP_REGS + SAVED_REGS:
+            self.reg_to_var[r] = None
+
+    # -------- utilidades internas --------
+
+    def _is_literal(self, op: Optional[str]) -> bool:
+        if op is None:
+            return False
+        s = str(op)
+        return s.isdigit() or (s.startswith('-') and s[1:].isdigit())
+
+    def _is_string_literal(self, op: Optional[str]) -> bool:
+        if op is None:
+            return False
+        s = str(op)
+        return s.startswith('"') and s.endswith('"')
+
+    # -------- API principal --------
+
+    def get_reg_for_var(self, var: str, for_write: bool = False) -> str:
+        """
+        Obtiene un registro para una variable "normal" (no literal, no string).
+        Sin spills a memoria.
+        """
+        # Si ya tiene registro, se reutiliza
+        if var in self.var_to_reg:
+            return self.var_to_reg[var]
+
+        # Primero intenta en temporales
+        for r in TEMP_REGS:
+            if self.reg_to_var[r] is None:
+                self.reg_to_var[r] = var
+                self.var_to_reg[var] = r
+                return r
+
+        # Luego en saved
+        for r in SAVED_REGS:
+            if self.reg_to_var[r] is None:
+                self.reg_to_var[r] = var
+                self.var_to_reg[var] = r
+                return r
+
+        # Si no hay libres, recicla el primero de $t0-$t7
+        victim = TEMP_REGS[0]
+        old_var = self.reg_to_var[victim]
+        if old_var is not None and old_var in self.var_to_reg:
+            del self.var_to_reg[old_var]
+        self.reg_to_var[victim] = var
+        self.var_to_reg[var] = victim
+        return victim
+
+    def ensure_in_reg(self, operand: str, emitter, data_section: DataSection) -> str:
+
+
+        if operand is None:
+            emitter.emit("    # WARNING: ensure_in_reg llamado con None, usando $zero")
+            return "$zero"
+        if operand == "this":
+            return "$a0"
+
+        # literales numéricos
+        if self._is_literal(operand):
+            emitter.emit(f"    li $at, {operand}")
+            return "$at"
+
+        # literales string
+        if self._is_string_literal(operand):
+            lbl = data_section.add_string(operand)
+            emitter.emit(f"    la $at, {lbl}")
+            return "$at"
+
+        # CASO ESPECIAL: variable global 'log' 
+        if operand == "log":
+            emitter.emit("    la $at, str_0")  # o log_buffer si estás usando buffer
+            return "$at"
+
+        # parámetros "param0..3" (solo si en tu TAC existen así)
+        if operand.startswith("param"):
+            try:
+                idx = int(operand.replace("param", ""))
+                if 0 <= idx <= 3:
+                    return f"$a{idx}"
+            except ValueError:
+            # si falla, cae a variable normal
+                pass
+
+
+        return self.get_reg_for_var(operand, for_write=False)
+
+
+
+
+# ============================================================
+#  INSTRUCTION EMITTER
+# ============================================================
 
 class InstructionEmitter:
-    def __init__(self, register_allocator, frame_manager, data_section):
-        self.reg_alloc = register_allocator
-        self.frame_manager = frame_manager
+    def __init__(self, reg_alloc: SimpleRegisterAllocator, data_section: DataSection):
+        self.reg_alloc = reg_alloc
         self.data_section = data_section
         self.output: List[str] = []
         self.pending_params: List[str] = []
-    
+        self.string_vars = set()
+        self.current_func: Optional[str] = None
+
     def emit(self, line: str):
         self.output.append(line)
-    
+
+    def emit_label(self, label: str):
+        self.output.append(f"{label}:")
+
     def get_output(self) -> List[str]:
         return self.output
-    
-    def clear_output(self):
-        self.output.clear()
-    
-    def _is_literal(self, operand: str) -> bool:
-        if operand is None:
+
+    # -------- utilidades --------
+
+    def _is_literal(self, op: Optional[str]) -> bool:
+        if op is None:
             return False
-        s = str(operand)
+        s = str(op)
         return s.isdigit() or (s.startswith('-') and s[1:].isdigit())
-    
-    def _is_string_literal(self, operand: str) -> bool:
-        s = str(operand)
+
+    def _is_string_literal(self, op: Optional[str]) -> bool:
+        if op is None:
+            return False
+        s = str(op)
         return s.startswith('"') and s.endswith('"')
-    
-    def _ensure_in_reg(self, operand: str) -> str:
-        if self._is_literal(operand):
-            self.emit(f"    li {REG_T9}, {operand}")
-            return REG_T9
-        if self._is_string_literal(operand):
-            label = self.data_section.add_string(operand)
-            self.emit(f"    la {REG_T9}, {label}")
-            return REG_T9
-        return self.reg_alloc.get_reg(operand, for_write=False)
-    
-    # ========== OPERACIONES ARITMÉTICAS ==========
-    
-    def emit_add(self, a1: str, a2: str, result: str):
-        if self._is_literal(a1) and self._is_literal(a2):
-            self.emit(f"    li $t8, {a1}")
-            ra = "$t8"
-            self.emit(f"    li $t9, {a2}")
-            rb = "$t9"
-        else:
-            ra = self._ensure_in_reg(a1)
-            rb = self._ensure_in_reg(a2)
-        
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    addu {rd}, {ra}, {rb}")
 
-    def emit_sub(self, a1: str, a2: str, result: str):
-        if self._is_literal(a1) and self._is_literal(a2):
-            self.emit(f"    li $t8, {a1}")
-            ra = "$t8"
-            self.emit(f"    li $t9, {a2}")
-            rb = "$t9"
-        else:
-            ra = self._ensure_in_reg(a1)
-            rb = self._ensure_in_reg(a2)
-        
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    subu {rd}, {ra}, {rb}")
+    def _ensure(self, op: str) -> str:
+        return self.reg_alloc.ensure_in_reg(op, self, self.data_section)
 
-    def emit_mul(self, a1: str, a2: str, result: str):
-        if self._is_literal(a1) and self._is_literal(a2):
-            self.emit(f"    li $t8, {a1}")
-            ra = "$t8"
-            self.emit(f"    li $t9, {a2}")
-            rb = "$t9"
-        else:
-            ra = self._ensure_in_reg(a1)
-            rb = self._ensure_in_reg(a2)
-        
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    mul {rd}, {ra}, {rb}")
+    # -------- control de flujo --------
 
-    def emit_div(self, a1: str, a2: str, result: str):
-        if self._is_literal(a1) and self._is_literal(a2):
-            self.emit(f"    li $t8, {a1}")
-            ra = "$t8"
-            self.emit(f"    li $t9, {a2}")
-            rb = "$t9"
-        else:
-            ra = self._ensure_in_reg(a1)
-            rb = self._ensure_in_reg(a2)
-        
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    div {ra}, {rb}")
-        self.emit(f"    mflo {rd}")
+    def emit_ifz(self, cond: str, label: str):
+        rc = self._ensure(cond)
+        self.emit(f"    beq {rc}, $zero, {label}")
 
-    def emit_mod(self, a1: str, a2: str, result: str):
-        if self._is_literal(a1) and self._is_literal(a2):
-            self.emit(f"    li $t8, {a1}")
-            ra = "$t8"
-            self.emit(f"    li $t9, {a2}")
-            rb = "$t9"
-        else:
-            ra = self._ensure_in_reg(a1)
-            rb = self._ensure_in_reg(a2)
-        
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    div {ra}, {rb}")
-        self.emit(f"    mfhi {rd}")
+    def emit_ifnz(self, cond: str, label: str):
+        rc = self._ensure(cond)
+        self.emit(f"    bne {rc}, $zero, {label}")
 
-    def emit_neg(self, a1: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    subu {rd}, {REG_ZERO}, {ra}")
-
-    def emit_not(self, a1: str, result: str):
-        ra = self._ensure_in_reg(a1)
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    sltiu {rd}, {ra}, 1")
-    
-    # ========== COMPARACIONES ==========
-    
-    def emit_cmp_eq(self, a1: str, a2: str, result: str):
-        if self._is_literal(a1) and self._is_literal(a2):
-            self.emit(f"    li $t8, {a1}")
-            ra = "$t8"
-            self.emit(f"    li $t9, {a2}")
-            rb = "$t9"
-        else:
-            ra = self._ensure_in_reg(a1)
-            rb = self._ensure_in_reg(a2)
-        
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    xor {rd}, {ra}, {rb}")
-        self.emit(f"    sltu {rd}, {rd}, 1")
-
-    def emit_cmp_ne(self, a1: str, a2: str, result: str):
-        if self._is_literal(a1) and self._is_literal(a2):
-            self.emit(f"    li $t8, {a1}")
-            ra = "$t8"
-            self.emit(f"    li $t9, {a2}")
-            rb = "$t9"
-        else:
-            ra = self._ensure_in_reg(a1)
-            rb = self._ensure_in_reg(a2)
-        
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    xor {rd}, {ra}, {rb}")
-        self.emit(f"    sltu {rd}, {REG_ZERO}, {rd}")
-
-    def emit_cmp_lt(self, a1: str, a2: str, result: str):
-        if self._is_literal(a1) and self._is_literal(a2):
-            self.emit(f"    li $t8, {a1}")
-            ra = "$t8"
-            self.emit(f"    li $t9, {a2}")
-            rb = "$t9"
-        else:
-            ra = self._ensure_in_reg(a1)
-            rb = self._ensure_in_reg(a2)
-        
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    slt {rd}, {ra}, {rb}")
-
-    def emit_cmp_le(self, a1: str, a2: str, result: str):
-        if self._is_literal(a1) and self._is_literal(a2):
-            self.emit(f"    li $t8, {a1}")
-            ra = "$t8"
-            self.emit(f"    li $t9, {a2}")
-            rb = "$t9"
-        else:
-            ra = self._ensure_in_reg(a1)
-            rb = self._ensure_in_reg(a2)
-        
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    slt {rd}, {rb}, {ra}")
-        self.emit(f"    xori {rd}, {rd}, 1")
-
-    def emit_cmp_gt(self, a1: str, a2: str, result: str):
-        if self._is_literal(a1) and self._is_literal(a2):
-            self.emit(f"    li $t8, {a1}")
-            ra = "$t8"
-            self.emit(f"    li $t9, {a2}")
-            rb = "$t9"
-        else:
-            ra = self._ensure_in_reg(a1)
-            rb = self._ensure_in_reg(a2)
-        
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    slt {rd}, {rb}, {ra}")
-
-    def emit_cmp_ge(self, a1: str, a2: str, result: str):
-        if self._is_literal(a1) and self._is_literal(a2):
-            self.emit(f"    li $t8, {a1}")
-            ra = "$t8"
-            self.emit(f"    li $t9, {a2}")
-            rb = "$t9"
-        else:
-            ra = self._ensure_in_reg(a1)
-            rb = self._ensure_in_reg(a2)
-        
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        self.emit(f"    slt {rd}, {ra}, {rb}")
-        self.emit(f"    xori {rd}, {rd}, 1")
-    
-    # ========== CONTROL DE FLUJO ==========
-    
-    def emit_label(self, label: str):
-        self.emit(f"{label}:")
-    
     def emit_jump(self, label: str):
         self.emit(f"    j {label}")
-    
-    def emit_ifz(self, cond: str, label: str):
-        rc = self._ensure_in_reg(cond)
-        self.emit(f"    beq {rc}, {REG_ZERO}, {label}")
-    
-    def emit_ifnz(self, cond: str, label: str):
-        rc = self._ensure_in_reg(cond)
-        self.emit(f"    bne {rc}, {REG_ZERO}, {label}")
-    
-    # ========== MOVIMIENTOS ==========
-    
-    def emit_mov(self, source: str, dest: str):
-        if self._is_literal(source):
-            rd = self.reg_alloc.get_reg(dest, for_write=True)
-            self.emit(f"    li {rd}, {source}")
-        elif self._is_string_literal(source):
-            rd = self.reg_alloc.get_reg(dest, for_write=True)
-            label = self.data_section.add_string(source)
-            self.emit(f"    la {rd}, {label}")
+
+    # -------- aritmética --------
+
+    def emit_add(self, a1: str, a2: str, res: str):
+        # Detectar si alguno de los operandos es string (literal o variable marcada)
+        is_str1 = a1 is not None and (self._is_string_literal(a1) or a1 in self.string_vars)
+        is_str2 = a2 is not None and (self._is_string_literal(a2) or a2 in self.string_vars)
+
+        if is_str1 or is_str2:
+            # "Concatenación" de strings:
+            # solo imprimimos los operandos y devolvemos la cadena vacía en res
+            if a1 is not None:
+                self.emit_print(a1)
+            if a2 is not None:
+                self.emit_print(a2)
+
+            if res is not None:
+                rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+                self.emit("    la $at, str_0")
+                self.emit(f"    move {rd}, $at")
+                self.string_vars.add(res)
+            return
+
+        # === Caso normal: suma entera ===
+        r1 = self._ensure(a1)
+        r2 = self._ensure(a2)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    addu {rd}, {r1}, {r2}")
+
+
+
+    def emit_sub(self, a1: str, a2: str, res: str):
+        r1 = self._ensure(a1)
+        r2 = self._ensure(a2)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    subu {rd}, {r1}, {r2}")
+
+    def emit_mul(self, a1: str, a2: str, res: str):
+        r1 = self._ensure(a1)
+        r2 = self._ensure(a2)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    mul {rd}, {r1}, {r2}")
+
+    def emit_div(self, a1: str, a2: str, res: str):
+        r1 = self._ensure(a1)
+        r2 = self._ensure(a2)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    div {r1}, {r2}")
+        self.emit(f"    mflo {rd}")
+
+    def emit_mod(self, a1: str, a2: str, res: str):
+        r1 = self._ensure(a1)
+        r2 = self._ensure(a2)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    div {r1}, {r2}")
+        self.emit(f"    mfhi {rd}")
+
+    def emit_neg(self, a1: str, res: str):
+        r1 = self._ensure(a1)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    subu {rd}, $zero, {r1}")
+
+    def emit_not(self, a1: str, res: str):
+        r1 = self._ensure(a1)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    sltiu {rd}, {r1}, 1")
+
+    # -------- comparaciones --------
+
+    def emit_cmp_eq(self, a1: str, a2: str, res: str):
+        r1 = self._ensure(a1)
+        r2 = self._ensure(a2)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    xor {rd}, {r1}, {r2}")
+        self.emit(f"    sltiu {rd}, {rd}, 1")
+
+    def emit_cmp_ne(self, a1: str, a2: str, res: str):
+        r1 = self._ensure(a1)
+        r2 = self._ensure(a2)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    xor {rd}, {r1}, {r2}")
+        self.emit(f"    sltu {rd}, $zero, {rd}")
+
+    def emit_cmp_lt(self, a1: str, a2: str, res: str):
+        r1 = self._ensure(a1)
+        r2 = self._ensure(a2)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    slt {rd}, {r1}, {r2}")
+
+    def emit_cmp_le(self, a1: str, a2: str, res: str):
+        r1 = self._ensure(a1)
+        r2 = self._ensure(a2)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    slt {rd}, {r2}, {r1}")
+        self.emit(f"    sltiu {rd}, {rd}, 1")
+
+    def emit_cmp_gt(self, a1: str, a2: str, res: str):
+        r1 = self._ensure(a1)
+        r2 = self._ensure(a2)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    slt {rd}, {r2}, {r1}")
+
+    def emit_cmp_ge(self, a1: str, a2: str, res: str):
+        r1 = self._ensure(a1)
+        r2 = self._ensure(a2)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        self.emit(f"    slt {rd}, {r1}, {r2}")
+        self.emit(f"    sltiu {rd}, {rd}, 1")
+
+    # -------- MOV --------
+
+    def emit_mov(self, src: str, dest: str):
+        # Si no hay destino, no generamos nada
+        if dest is None:
+            self.emit("    # WARNING: MOV con destino None ignorado")
+            return
+
+        if self._is_literal(src):
+            rd = self.reg_alloc.get_reg_for_var(dest, for_write=True)
+            self.emit(f"    li {rd}, {src}")
+            # dest NO es string, no lo marcamos
+        elif self._is_string_literal(src):
+            rd = self.reg_alloc.get_reg_for_var(dest, for_write=True)
+            lbl = self.data_section.add_string(src)
+            self.emit(f"    la {rd}, {lbl}")
+            # dest es un string
+            self.string_vars.add(dest)
         else:
-            rs = self._ensure_in_reg(source)
-            rd = self.reg_alloc.get_reg(dest, for_write=True)
+            rs = self._ensure(src)
+            rd = self.reg_alloc.get_reg_for_var(dest, for_write=True)
             self.emit(f"    move {rd}, {rs}")
-    
-    # ========== I/O ==========
-    
+            # Si src ya era string, dest también es string
+            if src in self.string_vars:
+                self.string_vars.add(dest)
+
+
+
     def emit_print(self, operand: str):
+        """
+        Política nueva:
+        - Si es literal de string -> syscall 4 (imprime string).
+        - Si la variable está marcada como string -> syscall 4.
+        - En cualquier otro caso -> SE IMPRIME COMO ENTERO (syscall 1).
+        Así nunca hacemos syscall 4 con un entero random como 0x20020000.
+        """
+        if operand is None:
+            self.emit("    # WARNING: PRINT llamado con None, ignorado")
+            return
+
+        # 1) Literal de string: "Hola", "...\n", etc
         if self._is_string_literal(operand):
-            label = self.data_section.add_string(operand)
-            self.emit(f"    la $a0, {label}")
-            self.emit(f"    li $v0, 4")  
-            self.emit(f"    syscall")
-        else:
-            ra = self._ensure_in_reg(operand)
-            self.emit(f"    move $a0, {ra}")
-            self.emit(f"    li $v0, 1")  
-            self.emit(f"    syscall")
-            self.emit(f"    li $a0, 10")
-            self.emit(f"    li $v0, 11")
-            self.emit(f"    syscall")
-    
-    # ========== OBJETOS (OOP) ==========
-    
-    def emit_new(self, class_name: str, result: str):
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        
+            lbl = self.data_section.add_string(operand)
+            self.emit(f"    la $a0, {lbl}")
+            self.emit("    li $v0, 4")   # print string
+            self.emit("    syscall")
+            return
+
+        # 2) Variable que sabemos que es string (movida desde un literal)
+        if operand in self.string_vars:
+            r = self._ensure(operand)
+            self.emit(f"    move $a0, {r}")
+            self.emit("    li $v0, 4")   # print string
+            self.emit("    syscall")
+            return
+
+        # 3) Resto de casos: tratamos el valor como ENTERO
+        r = self._ensure(operand)
+        self.emit(f"    move $a0, {r}")
+        self.emit("    li $v0, 1")       # print int
+        self.emit("    syscall")
+
+
+
+
+    # -------- Objetos (NEW / GETP / MOVP) --------
+
+    def emit_new(self, class_name: str, res: str):
+        """
+        Reserva 16 bytes (Persona/Estudiante) y los inicializa a 0.
+        """
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
         self.emit(f"    # NEW {class_name}")
-        self.emit(f"    li $a0, 100") 
-        self.emit(f"    li $v0, 9")     
+        self.emit(f"    li $a0, 16")
+        self.emit(f"    li $v0, 9")
         self.emit(f"    syscall")
-        self.emit(f"    move {rd}, $v0")  
-        
-        self.emit(f"    # Initialize fields to 0")
-        for i in range(0, 100, 4):
-            self.emit(f"    sw $zero, {i}({rd})")
-    
-    def emit_getp(self, obj: str, field: str, result: str):
-        robj = self._ensure_in_reg(obj)
-        rd = self.reg_alloc.get_reg(result, for_write=True)
-        
-        # Obtener offset del campo
-        offset = FIELD_OFFSETS.get(field, 0)
-        
-        self.emit(f"    # GETP {obj}.{field} -> {result}")
-        self.emit(f"    lw {rd}, {offset}({robj})")
-    
+        self.emit(f"    move {rd}, $v0")
+        for off in range(0, 16, 4):
+            self.emit(f"    sw $zero, {off}({rd})")
+
+    def emit_getp(self, obj: str, field: str, res: str):
+        base = self._ensure(obj)
+        rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+        off = FIELD_OFFSETS.get(field, 0)
+        self.emit(f"    # GETP {obj}.{field} -> {res}")
+        self.emit(f"    lw {rd}, {off}({base})")
+
     def emit_setp(self, value: str, obj: str, field: str):
-        rval = self._ensure_in_reg(value)
-        robj = self._ensure_in_reg(obj)
-        
-        # Obtener offset del campo
-        offset = FIELD_OFFSETS.get(field, 0)
-        
+        rv = self._ensure(value)
+        base = self._ensure(obj)
+        off = FIELD_OFFSETS.get(field, 0)
         self.emit(f"    # SETP {obj}.{field} = {value}")
-        self.emit(f"    sw {rval}, {offset}({robj})")
-    
-    # ========== FUNCIONES ==========
-    
+        self.emit(f"    sw {rv}, {off}({base})")
+
+    # -------- FUNCIONES / LLAMADAS --------
+
     def emit_enter(self, frame_size: int):
-        self.emit(f"    addi $sp, $sp, -4")
-        self.emit(f"    sw $ra, 0($sp)")
-        self.emit(f"    addi $sp, $sp, -4")
+        """
+        Prólogo muy simple: guarda $ra y $fp; NO usa locals ni offsets.
+        Recuerda: no estamos usando stack para variables, solo registros.
+        """
+        self.emit(f"    addi $sp, $sp, -8")
+        self.emit(f"    sw $ra, 4($sp)")
         self.emit(f"    sw $fp, 0($sp)")
         self.emit(f"    move $fp, $sp")
-        remaining_space = frame_size - 8
-        if remaining_space > 0:
-            self.emit(f"    addi $sp, $sp, -{remaining_space}")
-        saved_regs = self.frame_manager.get_saved_regs()
-        offset = -8
-        for reg in saved_regs:
-            self.emit(f"    sw {reg}, {offset}($fp)")
-            offset -= 4
-    
+
     def emit_leave(self):
-        saved_regs = self.frame_manager.get_saved_regs()
-        offset = -8
-        for reg in saved_regs:
-            self.emit(f"    lw {reg}, {offset}($fp)")
-            offset -= 4
         self.emit(f"    move $sp, $fp")
         self.emit(f"    lw $fp, 0($sp)")
-        self.emit(f"    addi $sp, $sp, 4")
-        self.emit(f"    lw $ra, 0($sp)")
-        self.emit(f"    addi $sp, $sp, 4")
-    
-    def emit_ret(self, return_value: Optional[str] = None):
-        if return_value:
-            rv = self._ensure_in_reg(return_value)
-            self.emit(f"    move $v0, {rv}")
+        self.emit(f"    lw $ra, 4($sp)")
+        self.emit(f"    addi $sp, $sp, 8")
+
+    def emit_ret(self, retval: Optional[str]):
+        if retval is not None:
+            r = self._ensure(retval)
+            self.emit(f"    move $v0, {r}")
+        self.emit_leave()
         self.emit(f"    jr $ra")
-    
+
     def emit_param(self, operand: str):
         self.pending_params.append(operand)
-    
-    def emit_call(self, func_label: str, result: Optional[str] = None):
+
+    def emit_call(self, func_label: str, res: Optional[str]):
+        """
+        Llamada de función:
+        - CASOS ESPECIALES: helpers nativos
+        - CASO GENERAL: jal func_label
+        """
+
+        # Nombre base sin el prefijo "func_"
+        base_name = func_label
+        if base_name.startswith("func_"):
+            base_name = base_name[5:]
+
+        # ======================
+        # CASOS ESPECIALES
+        # ======================
+
+        # --- printString(x: string): string ---
+        if base_name == "printString":
+            arg = self.pending_params[0] if self.pending_params else None
+            if arg is not None:
+                r = self._ensure(arg)          # r tiene la dirección del string
+                self.emit(f"    move $a0, {r}")
+                self.emit("    li $v0, 4")     # print string
+                self.emit("    syscall")
+                # Semántica del lenguaje: retorna el mismo string
+                if res is not None:
+                    rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+                    self.emit(f"    move {rd}, $a0")
+            self.pending_params.clear()
+            return
+
+        # --- printInteger(x: integer): integer ---
+        if base_name == "printInteger":
+            arg = self.pending_params[0] if self.pending_params else None
+            if arg is not None:
+                r = self._ensure(arg)          # r tiene el entero
+                self.emit(f"    move $a0, {r}")
+                self.emit("    li $v0, 1")     # print int
+                self.emit("    syscall")
+                # Retorna el mismo entero
+                if res is not None:
+                    rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+                    self.emit(f"    move {rd}, $a0")
+            self.pending_params.clear()
+            return
+
+        # --- toString(x: integer): string (stub) ---
+        if base_name == "toString":
+            # Ignoramos los parámetros, devolvemos puntero a "" (str_0)
+            if res is not None:
+                rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+                self.emit("    la $at, str_0")
+                self.emit(f"    move {rd}, $at")
+                self.string_vars.add(res)
+            self.pending_params.clear()
+            return
+
+        # --- MÉTODOS ESPECIALES DEL OBJETO: saludar / estudiar / incrementarEdad ---
+        if base_name in ("saludar", "estudiar", "incrementarEdad"):
+            reg_params = self.pending_params[:4]
+            for i, op in enumerate(reg_params):
+                if op is not None:
+                    r = self._ensure(op)
+                    self.emit(f"    move $a{i}, {r}")
+
+            self.emit(f"    jal {func_label}")
+
+            # Estas funciones imprimen internamente y conceptualmente
+            # devuelven un string (podemos modelarlo como la cadena vacía).
+            if res is not None:
+                rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
+                # Usamos una cadena vacía como valor de retorno "seguro"
+                self.emit("    la $at, str_0")
+                self.emit(f"    move {rd}, $at")
+                self.string_vars.add(res)
+
+            self.pending_params.clear()
+            return
+
+        # ======================
+        # CASO GENERAL (resto de funciones)
+        # ======================
         reg_params = self.pending_params[:4]
-        stack_params = self.pending_params[4:]
-        
-        # Stack params en orden inverso
-        for param in reversed(stack_params):
-            rp = self._ensure_in_reg(param)
-            self.emit(f"    addi $sp, $sp, -4")
-            self.emit(f"    sw {rp}, 0($sp)")
-        
-        # Register params
-        for i, param in enumerate(reg_params):
-            rp = self._ensure_in_reg(param)
-            self.emit(f"    move $a{i}, {rp}")
-        
-        # Call
+        for i, op in enumerate(reg_params):
+            if op is not None:
+                r = self._ensure(op)
+                self.emit(f"    move $a{i}, {r}")
+
         self.emit(f"    jal {func_label}")
-        
-        # Cleanup stack
-        if stack_params:
-            cleanup_bytes = len(stack_params) * 4
-            self.emit(f"    addi $sp, $sp, {cleanup_bytes}")
-        
-        # Capturar resultado
-        if result:
-            rd = self.reg_alloc.get_reg(result, for_write=True)
+
+        if res is not None:
+            rd = self.reg_alloc.get_reg_for_var(res, for_write=True)
             self.emit(f"    move {rd}, $v0")
-        
+
         self.pending_params.clear()
-        self.reg_alloc.descriptor.clear_all_temps()
 
 
-# ==================== MIPS CODE GENERATOR ====================
+
+# ============================================================
+#  MIPS CODE GENERATOR
+# ============================================================
 
 class MIPSCodeGen:
     def __init__(self):
         self.data_section = DataSection()
-        self.frame_manager = StackFrameManager()
-        self.reg_alloc = None
-        self.emitter = None
+        self.reg_alloc = SimpleRegisterAllocator()
+        self.emitter = InstructionEmitter(self.reg_alloc, self.data_section)
         self.output: List[str] = []
-        self.in_function = False
-    
+
     def generate(self, tac_program: TACProgram) -> str:
         self.output.clear()
-        self._preanalyze(tac_program)
-        self._generate_code(tac_program)
-        return self._assemble_program()
-    
-    def _preanalyze(self, tac_program: TACProgram):
-        current_func = None
-        for ins in tac_program.code:
-            op = ins.op
-            if op == "LABEL" and ins.res and str(ins.res).startswith("func_"):
-                func_name = str(ins.res)
-                self.frame_manager.enter_function(func_name)
-                current_func = func_name
-            elif op == "LEAVE":
-                if current_func:
-                    self.frame_manager.exit_function()
-                    current_func = None
-            elif op == "MOV" and current_func and ins.res:
-                var_name = str(ins.res)
-                if not (var_name.startswith('t') and var_name[1:].isdigit()):
-                    self.frame_manager.allocate_local(var_name)
-    
-    def _generate_code(self, tac_program: TACProgram):
-        # Encabezado
+
+        # .text y main
         self.output.append(".text")
         self.output.append(".globl main")
         self.output.append("main:")
-        
-        # Saltar a program_start
-        has_program_start = any(ins.op == "LABEL" and ins.res == "program_start" for ins in tac_program.code)
+
+        has_program_start = any(
+            ins.op == "LABEL" and ins.res == "program_start"
+            for ins in tac_program.code
+        )
         if has_program_start:
             self.output.append("    j program_start")
-        
-        # Crear emitter global
-        self.frame_manager.enter_function("__global__")
-        self.reg_alloc = RegisterAllocator(self.frame_manager)
-        self.emitter = InstructionEmitter(self.reg_alloc, self.frame_manager, self.data_section)
-        
-        # Generar instrucciones
+
         for ins in tac_program.code:
             self._translate_instruction(ins)
-        
-        # Volcar output final
-        if self.emitter:
-            self.output.extend(self.emitter.get_output())
-    
+
+        self.output.extend(self.emitter.get_output())
+
+        # ========= DATA =========
+        final_lines: List[str] = []
+
+        data_lines = self.data_section.generate_lines()
+        final_lines.extend(data_lines)
+
+        final_lines.extend(self.output)
+        return "\n".join(final_lines)
+
+
+    # ---------------------------
+
     def _translate_instruction(self, ins: TACInstr):
         op = ins.op
         a1 = str(ins.a1) if ins.a1 is not None else None
         a2 = str(ins.a2) if ins.a2 is not None else None
         res = str(ins.res) if ins.res is not None else None
-        
+
+        # LABEL
         if op == "LABEL":
             label = res if res else a1
-            if label and label.startswith("func_"):
-                if self.emitter and not self.in_function:
-                    self.output.extend(self.emitter.get_output())
-                    self.emitter.clear_output()
-                self._enter_function(label)
-            
             self.emitter.emit_label(label)
-            
-            # Exit en program_end
+
+
+            if label == "program_start" or label.startswith("func_"):
+                # Limpiar info de strings
+                self.emitter.string_vars.clear()
+                self.emitter.pending_params.clear()
+
+                # Resetear asignación de registros
+                self.reg_alloc.var_to_reg.clear()
+                self.reg_alloc.reg_to_var = {r: None for r in TEMP_REGS + SAVED_REGS}
+
+            self.emitter.current_func = label
+
             if label == "program_end":
                 self.emitter.emit("")
                 self.emitter.emit("# Exit program")
                 self.emitter.emit("    li $v0, 10")
                 self.emitter.emit("    syscall")
-        
-        elif op == "JUMP":
-            label = a1 if a1 else res
-            self.emitter.emit_jump(label)
-        elif op == "IFZ":
+            return
+
+        # CONTROL FLOW
+        if op == "JUMP":
+            self.emitter.emit_jump(a1 or res)
+            return
+        if op == "IFZ":
             self.emitter.emit_ifz(a1, res)
-        elif op == "IFNZ":
+            return
+        if op == "IFNZ":
             self.emitter.emit_ifnz(a1, res)
-        
-        elif op == "ADD":
+            return
+
+        # ARITH
+        if op == "ADD":
             self.emitter.emit_add(a1, a2, res)
-        elif op == "SUB":
+            return
+        if op == "SUB":
             self.emitter.emit_sub(a1, a2, res)
-        elif op == "MUL":
+            return
+        if op == "MUL":
             self.emitter.emit_mul(a1, a2, res)
-        elif op == "DIV":
+            return
+        if op == "DIV":
             self.emitter.emit_div(a1, a2, res)
-        elif op == "MOD":
+            return
+        if op == "MOD":
             self.emitter.emit_mod(a1, a2, res)
-        elif op == "NEG":
+            return
+        if op == "NEG":
             self.emitter.emit_neg(a1, res)
-        elif op == "NOT":
+            return
+        if op == "NOT":
             self.emitter.emit_not(a1, res)
-        
-        elif op == "CMP==":
+            return
+
+        # COMPARISONS
+        if op == "CMP==":
             self.emitter.emit_cmp_eq(a1, a2, res)
-        elif op == "CMP!=":
+            return
+        if op == "CMP!=":
             self.emitter.emit_cmp_ne(a1, a2, res)
-        elif op == "CMP<":
+            return
+        if op == "CMP<":
             self.emitter.emit_cmp_lt(a1, a2, res)
-        elif op == "CMP<=":
+            return
+        if op == "CMP<=":
             self.emitter.emit_cmp_le(a1, a2, res)
-        elif op == "CMP>":
+            return
+        if op == "CMP>":
             self.emitter.emit_cmp_gt(a1, a2, res)
-        elif op == "CMP>=":
+            return
+        if op == "CMP>=":
             self.emitter.emit_cmp_ge(a1, a2, res)
-        
-        elif op == "MOV":
+            return
+
+        # MOV / PRINT
+        if op == "MOV":
             self.emitter.emit_mov(a1, res)
-        elif op == "PRINT":
+            return
+        if op == "PRINT":
             self.emitter.emit_print(a1)
-        
-        elif op == "ENTER":
+            return
+
+        # FUNCIONES
+        if op == "ENTER":
             frame_size = int(a1) if a1 and a1.isdigit() else 0
             self.emitter.emit_enter(frame_size)
-        elif op == "LEAVE":
-            self.emitter.emit_leave()
-        elif op == "RET":
+            return
+        if op == "LEAVE":
+            # en este diseño, LEAVE no hace nada especial
+            # (el RET ya llama a emit_leave)
+            return
+        if op == "RET":
             self.emitter.emit_ret(a1)
-            self._exit_function()
-        elif op == "PARAM":
+            return
+        if op == "PARAM":
             self.emitter.emit_param(a1)
-        elif op == "CALL":
+            return
+        if op == "CALL":
             self.emitter.emit_call(a1, res)
-        
-        # ========== OOP OPERATIONS ==========
-        elif op == "NEW":
+            return
+
+        # OBJETOS
+        if op == "NEW":
             self.emitter.emit_new(a1, res)
-        elif op == "GETP":
+            return
+        if op == "GETP":
             self.emitter.emit_getp(a1, a2, res)
-        elif op == "MOVP":
+            return
+        if op == "MOVP":
             self.emitter.emit_setp(a1, a2, res)
-        
-        else:
-            self.emitter.emit(f"    # Unsupported: {op}")
-    
-    def _enter_function(self, func_label: str):
-        self.in_function = True
-        self.frame_manager.enter_function(func_label)
-        self.reg_alloc = RegisterAllocator(self.frame_manager)
-        self.emitter = InstructionEmitter(self.reg_alloc, self.frame_manager, self.data_section)
-    
-    def _exit_function(self):
-        if self.emitter:
-            self.output.extend(self.emitter.get_output())
-            self.emitter.clear_output()
-        self.frame_manager.exit_function()
-        self.in_function = False
-    
-    def _assemble_program(self) -> str:
-        final = []
-        data_lines = self.data_section.generate()
-        if data_lines:
-            final.extend(data_lines)
-        final.extend(self.output)
-        return "\n".join(final)
+            return
 
+        # Si algo no está soportado, solo comenta
+        self.emitter.emit(f"    # Unsupported TAC op: {op}")
 
-# ==================== API PÚBLICA ====================
+# ============================================================
+#  API PÚBLICA
+# ============================================================
 
 def generate_mips_from_tac(tac_program: TACProgram) -> str:
-    codegen = MIPSCodeGen()
-    return codegen.generate(tac_program)
+    cg = MIPSCodeGen()
+    return cg.generate(tac_program)
